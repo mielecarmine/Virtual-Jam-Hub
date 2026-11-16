@@ -4,5 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+cpal = "0.15.3"
+ctrlc = "3.4"
+rtrb = "0.3.2"
+
 [lints]
 workspace = true

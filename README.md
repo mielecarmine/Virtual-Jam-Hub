@@ -173,3 +173,57 @@ tentativo di `send_to`, includendo validazione e watchdog; esclude l'attesa di r
 ```bash
 cargo test --release -p jam-server --test udp_reflector five_peer_forwarding_stays_below_200_microseconds -- --ignored --nocapture
 ```
+
+### 7. Loopback audio hardware locale — JAM-8
+
+Il client CLI collega l'ingresso audio all'uscita locale senza server o rete:
+
+```text
+cpal input -> mic_to_net -> thread local-loopback -> net_to_speaker -> cpal output
+```
+
+Servono dispositivi di ingresso e uscita predefiniti che supportino `f32`,
+48.000 Hz e un buffer fisso di **128 frame per canale** (circa 2,67 ms).
+Su Linux servono anche `pkg-config` e gli header ALSA (`libasound2-dev` su Debian/Ubuntu).
+Selezionare l'interfaccia desiderata nelle impostazioni audio del sistema prima dell'avvio.
+Il client sceglie la configurazione compatibile con meno canali: acquisisce il primo
+canale di ingresso come segnale mono e lo riproduce su tutti i canali di uscita.
+Non effettua conversioni implicite di formato o frequenza.
+
+```bash
+# Prova di accettazione: cinque minuti effettivi dopo l'avvio della riproduzione.
+cargo run --locked --release -p jam-client
+
+# Prova breve o durata personalizzata; Ctrl+C interrompe anticipatamente.
+cargo run --locked --release -p jam-client -- --seconds 10
+cargo run --locked -p jam-client -- --help
+```
+
+Usare cuffie per evitare feedback acustico. I due ring buffer `rtrb::RingBuffer<f32>`
+contengono ciascuno 4096 campioni mono; tutta la memoria viene allocata prima
+dell'avvio degli stream. I callback dati eseguono solo accessi a slice, operazioni
+SPSC e contatori atomici; anche i callback di errore aggiornano solo atomici.
+Stampe, attese e gestione della durata sono esterni ai callback.
+
+All'avvio l'uscita resta silenziosa fino alla disponibilità di 256 campioni
+(due blocchi, circa 5,33 ms) per assorbire lo sfasamento iniziale tra i callback.
+Il worker trasferisce i campioni disponibili e attende 250 µs tra le iterazioni.
+La capacità di 4096 campioni è un limite, non una coda mantenuta intenzionalmente piena.
+La latenza fisica totale include driver, dispositivi e scheduling: va misurata
+con un segnale e una registrazione esterna; il programma non la misura.
+Interfacce con clock indipendenti possono accumulare deriva: questo loopback
+non implementa ricampionamento o compensazione del clock.
+
+L'overflow scarta i nuovi campioni di ingresso; l'underflow riempie con silenzio
+i campioni mancanti. Entrambi vengono contati. Il client interrompe la prova
+se rileva campioni persi, errori `cpal` o callback di dimensione diversa da 128 frame,
+e termina con codice non zero. Un dispositivo o formato non disponibile causa
+un errore esplicito; un ingresso che non produce audio causa un timeout di 5 secondi.
+Il riepilogo finale riporta callback, campioni persi e contatori di errore.
+
+Per accettare la prova hardware, lasciare terminare tutti i 300 secondi,
+verificare che i contatori di errore siano zero e confermare all'ascolto
+l'assenza di click/interruzioni. Un arresto anticipato non completa la prova.
+I test automatici verificano configurazione, ordine dei campioni, canali,
+wrap-around, overflow, underflow e zero allocazioni nei percorsi audio;
+non sostituiscono l'ascolto su hardware reale.
