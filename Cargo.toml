@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/jam-protocol", "crates/jam-server", "crates/jam-client"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
