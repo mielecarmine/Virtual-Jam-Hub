@@ -1,8 +1,8 @@
 //! Nonblocking UDP worker. All sockets and protocol processing stay off audio callbacks.
 
 use crate::{
-    audio::BUFFER_FRAMES,
-    jitter::{CHUNK_TIME, Chunk, PeerJitterBuffer},
+    codec::{self, Encoded, FRAME_SAMPLES, PAYLOAD_SIZE},
+    jitter::{CHUNK_TIME, PeerJitterBuffer},
     mixer::RxChannels,
 };
 use jam_protocol::{
@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const PACKET_SIZE: usize = AUDIO_HEADER_SIZE + BUFFER_FRAMES * size_of::<f32>();
+const PACKET_SIZE: usize = AUDIO_HEADER_SIZE + PAYLOAD_SIZE;
 const JOIN_INTERVAL: Duration = Duration::from_millis(500);
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,10 +45,11 @@ struct Delayed {
     due: Instant,
     peer: u8,
     sequence: u32,
-    chunk: Chunk,
+    chunk: Encoded,
 }
 
 pub struct Network {
+    encoder: opus::Encoder,
     settings: Settings,
     peers: BTreeMap<u8, PeerJitterBuffer>,
     delayed: Vec<Delayed>,
@@ -81,6 +82,7 @@ impl Network {
         bytes[..nickname.len()].copy_from_slice(nickname.as_bytes());
         let now = Instant::now();
         Ok(Self {
+            encoder: codec::encoder().map_err(io::Error::other)?,
             settings: Settings::default(),
             peers: BTreeMap::new(),
             delayed: Vec::new(),
@@ -134,7 +136,7 @@ impl Network {
         });
     }
 
-    fn playback(&mut self, speaker: &mut RxChannels, now: Instant) {
+    fn playback(&mut self, speaker: &mut RxChannels, now: Instant) -> io::Result<()> {
         // Deliver in simulated arrival order even when several deadlines fall in one tick.
         self.delayed
             .sort_unstable_by_key(|packet| std::cmp::Reverse(packet.due));
@@ -142,12 +144,17 @@ impl Network {
             let Some(packet) = self.delayed.pop() else {
                 break;
             };
-            self.peers
-                .entry(packet.peer)
-                .or_insert_with(|| {
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.peers.entry(packet.peer)
+            {
+                entry.insert(
                     PeerJitterBuffer::new(packet.sequence, now, self.settings.target_chunks)
-                })
-                .insert(packet.sequence, &packet.chunk, now);
+                        .map_err(io::Error::other)?,
+                );
+            }
+            if let Some(peer) = self.peers.get_mut(&packet.peer) {
+                peer.insert(packet.sequence, &packet.chunk, now)
+                    .map_err(io::Error::other)?;
+            }
         }
         self.peers.retain(|id, peer| {
             let keep = now.duration_since(peer.last_received) < SERVER_TIMEOUT;
@@ -158,13 +165,13 @@ impl Network {
         });
         if self.peers.is_empty() {
             self.next_playout = None;
-            return;
+            return Ok(());
         }
         let next = self
             .next_playout
             .get_or_insert_with(|| self.peers.values().map(|p| p.ready_at).min().unwrap_or(now));
         if now < *next {
-            return;
+            return Ok(());
         }
         // Never catch up with a burst after a worker stall: discard stale timing debt.
         *next = if now.duration_since(*next) >= CHUNK_TIME {
@@ -173,10 +180,11 @@ impl Network {
             *next + CHUNK_TIME
         };
         for (&id, peer) in &mut self.peers {
-            if let Some(chunk) = peer.pop(now) {
+            if let Some(chunk) = peer.pop(now).map_err(io::Error::other)? {
                 speaker.push(id, &chunk);
             }
         }
+        Ok(())
     }
 
     fn send(&self, packet: &[u8]) -> io::Result<()> {
@@ -272,7 +280,7 @@ impl Network {
                 self.incoming(bytes, id, now);
             }
         }
-        self.playback(speaker, now);
+        self.playback(speaker, now)?;
         let Some(id) = self.peer_id else {
             // Capture continues during join; do not replay stale audio after acceptance.
             for _ in 0..mic.slots() {
@@ -293,20 +301,34 @@ impl Network {
             })?;
             self.last_ping = now;
         }
+        self.send_audio(id, mic)
+    }
+
+    fn send_audio(&mut self, id: u8, mic: &mut Consumer<f32>) -> io::Result<()> {
         for _ in 0..32 {
-            if mic.slots() < BUFFER_FRAMES {
+            if mic.slots() < FRAME_SAMPLES {
                 break;
             }
             let mut packet = [0; PACKET_SIZE];
             AudioHeader::new(id, STREAM_PRIMARY, self.sequence, self.timestamp)
                 .to_bytes(&mut packet)
                 .map_err(io::Error::other)?;
-            for bytes in packet[AUDIO_HEADER_SIZE..].chunks_exact_mut(4) {
-                bytes.copy_from_slice(&mic.pop().map_err(io::Error::other)?.to_le_bytes());
+            let mut samples = [0.0; FRAME_SAMPLES];
+            for sample in &mut samples {
+                let captured = mic.pop().map_err(io::Error::other)?;
+                *sample = if captured.is_finite() {
+                    captured.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
             }
-            self.send(&packet)?;
+            let length = self
+                .encoder
+                .encode_float(&samples, &mut packet[AUDIO_HEADER_SIZE..])
+                .map_err(io::Error::other)?;
+            self.send(&packet[..AUDIO_HEADER_SIZE + length])?;
             self.sequence = self.sequence.wrapping_add(1);
-            self.timestamp = self.timestamp.wrapping_add(128);
+            self.timestamp = self.timestamp.wrapping_add(120);
         }
         Ok(())
     }
@@ -331,7 +353,7 @@ impl Network {
     }
 }
 
-fn receive_audio(packet: &[u8], local_id: u8) -> Option<(AudioHeader, Chunk)> {
+fn receive_audio(packet: &[u8], local_id: u8) -> Option<(AudioHeader, Encoded)> {
     let header = AudioHeader::from_bytes(packet).ok()?;
     if packet.len() != PACKET_SIZE
         || header.peer_id == local_id
@@ -340,20 +362,11 @@ fn receive_audio(packet: &[u8], local_id: u8) -> Option<(AudioHeader, Chunk)> {
     {
         return None;
     }
-    let mut samples = [0.0; BUFFER_FRAMES];
-    for (sample, bytes) in samples
-        .iter_mut()
-        .zip(packet[AUDIO_HEADER_SIZE..].chunks_exact(4))
-    {
-        let Ok(bytes) = bytes.try_into() else {
-            return None;
-        };
-        *sample = f32::from_le_bytes(bytes);
-        if !sample.is_finite() || sample.abs() > 1.0 {
-            return None;
-        }
+    let payload = &packet[AUDIO_HEADER_SIZE..];
+    if !codec::valid_payload(payload) {
+        return None;
     }
-    Some((header, samples))
+    Some((header, payload.try_into().ok()?))
 }
 
 #[cfg(test)]

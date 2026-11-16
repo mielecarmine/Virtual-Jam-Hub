@@ -68,7 +68,7 @@ EPIC 1 — Fondazione & Protocollo (jam-protocol): Setup workspace, definizione 
 
 EPIC 2 — Service SFU sul VPS (jam-server): Socket UDP non bloccante, SessionTable con watchdog timeout a 5s, inoltro 1 -> N-1, stress test locale con 5 bot e deploy su Linux via systemd.
 
-EPIC 3 — Motore Audio & Rete (jam-client CLI): Loopback hardware cpal + rtrb, streaming PCM raw su UDP, Jitter Buffer per singolo peer con simulatore di packet loss/jitter, mixer RT con soft-clipping e integrazione Opus.
+EPIC 3 — Motore Audio & Rete (jam-client CLI): Loopback hardware cpal + rtrb, streaming Opus su UDP, Jitter Buffer per singolo peer con simulatore di packet loss/jitter, mixer RT con soft-clipping e integrazione Opus.
 
 EPIC 4 — Interfaccia Grafica & UX (jam-client GUI): Setup dispositivi audio in egui, channel strip dinamiche (fader dB, Mute, Solo) e telemetria live (VU meter, Ping RTT, Jitter, Packet Loss).
 
@@ -267,7 +267,7 @@ I test automatici verificano configurazione, ordine dei campioni, canali,
 wrap-around, overflow, underflow e zero allocazioni nei percorsi audio;
 non sostituiscono l'ascolto su hardware reale.
 
-### 8. Audio PCM via server UDP — JAM-9
+### 8. Audio via server UDP — JAM-9 e JAM-12
 
 Per collegare due musicisti, avviare `jam-server` e usare lo stesso indirizzo
 **IP:porta** su entrambi i client (IPv6: `[IP]:porta`). Per esempio, su una LAN:
@@ -296,22 +296,29 @@ inviano `Leave` al meglio delle possibilità di UDP. La durata in modalità rete
 parte dall'avvio degli stream, anche se il secondo musicista non è ancora presente.
 L'attesa del join resta interrompibile e viene mostrato l'ID assegnato.
 
-Ogni datagramma audio contiene l'header condiviso da 12 byte seguito da **128
-campioni mono `f32` little-endian**: 524 byte totali, circa 1,57 Mbit/s per flusso
-incluso l'header JAM (esclusi UDP/IP). Sequenza e timestamp avanzano con wrap-around.
-Non c'è un indicatore del codec sul wire: entrambi i client devono usare questa
-stessa modalità PCM. Il server SFU inoltra il payload senza interpretarlo.
-Pacchetti con lunghezza errata, header non valido, stream diverso dal primario,
-eco locale o campioni non finiti/fuori da `[-1, 1]` vengono scartati; un buffer di
-uscita pieno scarta l'intero frame ricevuto.
+Ogni datagramma audio contiene l'header condiviso da 12 byte seguito da **30 byte
+Opus mono**: 42 byte totali, 400 pacchetti/s, **96 kbit/s di payload** e 134,4 kbit/s
+incluso l'header JAM (esclusi UDP/IP). Il codec usa `Application::LowDelay` (CELT),
+48 kHz, frame da **120 campioni / 2,5 ms** e bitrate CBR fisso. Un solo encoder
+locale vive nel worker UDP; i callback hardware restano da 128 frame. Il ring
+SPSC conserva i campioni residui tra i callback, senza padding o ricampionamento.
+Sequenza e timestamp avanzano rispettivamente di 1 e 120 con wrap-around.
 
-Il riordino e il jitter buffer per peer sono implementati in JAM-10 (vedi sotto).
-Il mixer multicanale è descritto in JAM-11; Opus resta previsto in JAM-12.
+Il formato sostituisce il PCM di JAM-9: **tutti i client della stanza devono essere
+aggiornati**, perché non esiste negoziazione del codec. Il server SFU resta
+invariato e inoltra il payload senza interpretarlo. Il client scarta datagrammi
+con lunghezza errata, header non valido, stream diverso dal primario, byte
+riservato non zero, eco locale, durata Opus diversa da 120 campioni o audio stereo.
+In cattura i campioni non finiti diventano silenzio e quelli fuori `[-1, 1]`
+vengono limitati prima della codifica. Il decoder limita l'uscita a `[-1, 1]`.
+
+Il jitter buffer per peer (JAM-10) riordina i pacchetti compressi prima della
+decodifica; il mixer multicanale (JAM-11) riceve PCM tramite i ring dedicati.
 Gli underflow di rete producono silenzio e vengono contati senza interrompere
 la sessione; i problemi hardware `cpal` restano fatali. Gli overflow d'ingresso
 vengono contati e scartati. Il loopback mantiene i suoi criteri rigorosi JAM-8.
 
-I test automatici verificano retry, heartbeat, framing PCM, wrap-around,
+I test automatici verificano retry, heartbeat, framing Opus, wrap-around,
 validazione dei pacchetti, isolamento dell'endpoint UDP, timeout e `Leave`,
 oltre allo scambio bidirezionale senza eco fra due worker e un vero `jam-server`
 su localhost. Per completare l'accettazione hardware, avviare i due client su
@@ -321,20 +328,25 @@ dell'altro in tempo reale. Questo ascolto non è sostituito dai test automatici.
 ### 9. Jitter buffer per peer e simulatore — JAM-10
 
 Ogni peer remoto ha un `PeerJitterBuffer` separato nel worker UDP, con 64 slot
-preallocati alla prima ricezione audio. Il playback attende inizialmente **3 chunk
-(~8 ms)** e riordina i numeri di sequenza, incluso il wrap-around `u32`.
+preallocati alla prima ricezione audio, insieme a un decoder Opus indipendente.
+Il playback attende inizialmente **3 chunk (7,5 ms)** e riordina i numeri di sequenza, incluso il wrap-around `u32`.
 `--jitter-chunks N` permette un ritardo iniziale da 1 a 16 chunk. Questo ritardo
 si aggiunge al prefill del ring audio e ai buffer del dispositivo.
 
 I frame duplicati già in coda e quelli tardivi vengono scartati. Un frame tardivo
-fa crescere il target di un chunk fino a 16 (~43 ms), inserendo un frame di
+fa crescere il target di un chunk fino a 16 (40 ms), inserendo un frame di
 compensazione senza fermare il playback; il target rimane al valore raggiunto
-fino alla rimozione del peer. I frame mancanti vengono sostituiti ripetendo
-l'ultimo chunk con attenuazione progressiva (fattore 0,8), fino al silenzio.
-Una grande discontinuità di sequenza reinizializza soltanto il peer interessato.
+fino alla rimozione del peer. I frame mancanti vengono sintetizzati dal PLC del decoder Opus del peer.
+Con il crate `opus`, `decode_float(&[], &mut output, false)` rappresenta un
+pacchetto perso: il flag FEC resta disattivato, perché CELT non usa il FEC SILK.
+Anche un payload corrotto rilevato in decodifica viene trattato come perdita.
+Il frame di compensazione per aumentare il target ripete l'ultima uscita attenuata
+(fattore 0,8), senza avanzare il decoder rispetto ai pacchetti accodati.
+Una grande discontinuità di sequenza reinizializza coda e decoder del solo peer
+interessato; gli altri decoder conservano la propria storia.
 La lista peer e un timeout di 5 secondi eliminano gli stati non più attivi.
 
-Il worker produce al massimo un chunk per scadenza (~2,67 ms), senza recuperare
+Il worker produce al massimo un chunk per scadenza (2,5 ms), senza recuperare
 ritardi con raffiche. Invia ogni peer pronto al suo ring SPSC dedicato; un ring
 pieno scarta soltanto il chunk di quel peer. Il mix avviene nel callback audio
 come descritto in JAM-11. I callback `cpal` restano senza allocazioni, lock o I/O.
@@ -362,7 +374,7 @@ interruzioni con questi flag; tale verifica hardware rimane manuale.
 In modalità UDP, il callback di output legge un array fisso di `MAX_PEERS` ring
 `rtrb` (4096 campioni ciascuno), indicizzati con `peer_id - 1` e allocati prima
 dell'avvio degli stream. Il worker conserva un jitter buffer indipendente per
-peer e non somma né limita più i campioni. Il callback somma `sample * gain`
+peer e limita i campioni decodificati senza sommare i flussi. Il callback somma `sample * gain`
 e applica `tanh(sum)`, duplicando il risultato mono sui canali hardware.
 Con quattro flussi da `0.8`, l'uscita è circa `0.9967` e resta in `[-1, 1]`.
 Il soft clipping modifica anche i segnali sotto soglia, secondo la curva `tanh`.
@@ -386,3 +398,18 @@ I test coprono quattro flussi simultanei, continuità della curva, gain/mute/sol
 su audio già accodato, stereo, underflow, overflow indipendente, riuso ID e zero
 allocazioni nel callback anche durante il ricambio dei peer. La conferma
 all'ascolto con più musicisti resta una verifica hardware manuale.
+
+### 11. Compilazione e verifica Opus — JAM-12
+
+Il crate `opus` usa `opusic-sys`, che compila la copia inclusa di libopus:
+servono **CMake e un compilatore C/C++** oltre ai prerequisiti audio di `cpal`.
+Non occorre installare separatamente libopus sul sistema di esecuzione.
+
+I test verificano configurazione LowDelay/CBR, payload di 30 byte, durata mono,
+qualità del round-trip su un tono, passaggio 128 → 120 senza perdere campioni,
+riordino prima della decodifica, PLC su una perdita e su perdite consecutive,
+ripresa e wrap-around, reset e isolamento dei decoder per peer. Restano coperti
+il simulatore al 2% di perdita / 10 ms di jitter, lo scambio bidirezionale e quattro
+peer remoti attraverso un vero SFU, oltre alle zero allocazioni dei callback.
+La verifica percettiva su strumenti e hardware reali resta manuale: usare due
+client aggiornati, prima senza simulatore e poi con i flag della sezione 9.

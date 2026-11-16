@@ -9,6 +9,7 @@ jam-protocol = { path = "../jam-protocol" }
 cpal = "0.15.3"
 ctrlc = "3.4"
 rtrb = "0.3.2"
+opus = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 cpal = { version = "0.15.3", features = ["asio"] }
