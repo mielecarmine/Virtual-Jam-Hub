@@ -1,7 +1,8 @@
-//! Hardware loopback or bidirectional raw PCM over UDP.
+//! Hardware loopback or bidirectional Opus over UDP.
 
 mod audio;
 mod cli;
+mod codec;
 mod jitter;
 mod mixer;
 mod network;
