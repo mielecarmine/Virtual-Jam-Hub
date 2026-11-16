@@ -70,7 +70,9 @@ fn only_valid_client_packets_refresh_sessions() {
     let later = now + Duration::from_secs(4);
     server.handle(&[0; 16], source, later);
     let mut spoofed = [0; 120];
-    AudioHeader::new(2, 0, 0).to_bytes(&mut spoofed).unwrap();
+    AudioHeader::new(2, jam_protocol::STREAM_PRIMARY, 0, 0)
+        .to_bytes(&mut spoofed)
+        .unwrap();
     server.handle(&spoofed, source, later);
     handle(
         &mut server,
@@ -104,7 +106,9 @@ fn only_valid_client_packets_refresh_sessions() {
     );
     assert!(!server.sessions.expire(now + Duration::from_secs(6)));
     let mut packet = [0; 16];
-    AudioHeader::new(1, 0, 0).to_bytes(&mut packet).unwrap();
+    AudioHeader::new(1, jam_protocol::STREAM_PRIMARY, 0, 0)
+        .to_bytes(&mut packet)
+        .unwrap();
     server.handle(&packet, source, now + Duration::from_secs(8));
     assert!(!server.sessions.expire(now + Duration::from_secs(10)));
 }
@@ -170,7 +174,9 @@ fn expired_peer_cannot_send_or_receive_audio() {
             .unwrap(),
     );
     let mut packet = [0; 120];
-    AudioHeader::new(2, 0, 0).to_bytes(&mut packet).unwrap();
+    AudioHeader::new(2, jam_protocol::STREAM_PRIMARY, 0, 0)
+        .to_bytes(&mut packet)
+        .unwrap();
     expired.send(&packet).unwrap();
     server.poll().unwrap();
     assert!(server.last_reflection_duration().is_none());
@@ -180,7 +186,9 @@ fn expired_peer_cannot_send_or_receive_audio() {
         ControlMessage::from_bytes(&buffer[..length]).unwrap(),
         ControlMessage::PeerListUpdate { peers } if peers.len() == 1
     ));
-    AudioHeader::new(1, 0, 0).to_bytes(&mut packet).unwrap();
+    AudioHeader::new(1, jam_protocol::STREAM_PRIMARY, 0, 0)
+        .to_bytes(&mut packet)
+        .unwrap();
     active.send(&packet).unwrap();
     server.poll().unwrap();
     for client in [&active, &expired] {

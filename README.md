@@ -93,6 +93,30 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 
+### Header audio e flussi
+
+`AudioHeader` mantiene 12 byte e allineamento C a 4 byte. Il wire usa little-endian:
+
+| Offset | Campo | Byte |
+| --- | --- | --- |
+| 0 | magic | 2 |
+| 2 | packet_type | 1 |
+| 3 | peer_id | 1 |
+| 4 | sequence_number | 4 |
+| 8 | timestamp_samples | 2 |
+| 10 | stream_id | 1 |
+| 11 | reserved | 1 |
+
+`AudioHeader::new(peer_id, stream_id, sequence_number, timestamp_samples)` inizializza
+`reserved` a zero. `STREAM_PRIMARY = 0` identifica lo strumento principale e
+`STREAM_TALKBACK = 1` la voce; gli altri ID di flusso restano disponibili.
+Sequenza e timestamp avanzano con `wrapping_add`, rispettivamente modulo 2^32 e 2^16.
+La serializzazione opera direttamente su slice, senza allocazioni, anche su input
+non allineato. Il server inoltra tutti i flussi senza modificarli.
+
+Questo layout sostituisce il precedente timestamp a 32 bit: client e server devono
+usare la stessa versione del protocollo, perché il vecchio formato non è compatibile.
+
 ### 6. Avvio del server UDP
 
 ```bash
