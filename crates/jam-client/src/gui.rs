@@ -3,13 +3,14 @@
 use std::{
     io,
     path::PathBuf,
+    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 
 use eframe::egui;
 
 use crate::{
-    controller::{Command, Controller, Event, Phase},
+    controller::{Command, Controller, Event, MixerView, Phase},
     setup::{self, Catalog, DeviceInfo, Preferences},
 };
 
@@ -24,6 +25,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let controller = Controller::start(preferences.clone(), path.clone())?;
     let app = AppState {
+        mixer: None,
         preferences,
         controller,
         path,
@@ -47,6 +49,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 struct AppState {
+    mixer: Option<MixerView>,
     preferences: Preferences,
     controller: Controller,
     path: PathBuf,
@@ -72,6 +75,7 @@ impl AppState {
     fn events(&mut self) {
         while let Ok(event) = self.controller.events.try_recv() {
             match event {
+                Event::Mixer(view) => self.mixer = Some(view),
                 Event::Catalog(result) => {
                     self.loading = false;
                     match result {
@@ -83,6 +87,9 @@ impl AppState {
                     }
                 }
                 Event::Phase(phase) => {
+                    if phase == Phase::Disconnected {
+                        self.mixer = None;
+                    }
                     self.phase = phase;
                     self.disconnecting = false;
                 }
@@ -197,6 +204,60 @@ impl AppState {
         }
     }
 
+    fn mixer(&self, ui: &mut egui::Ui) {
+        if self.phase != Phase::Connected {
+            return;
+        }
+        ui.separator();
+        ui.heading("Il tuo mix in cuffia");
+        let Some(view) = &self.mixer else {
+            ui.label("In attesa della lista dei musicisti…");
+            return;
+        };
+        if view.peers.is_empty() {
+            ui.label("Nessun altro musicista nella stanza.");
+        }
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                for peer in &view.peers {
+                    ui.push_id(peer.peer_id, |ui| {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(110.0);
+                            ui.vertical_centered(|ui| {
+                                ui.strong(String::from_utf8_lossy(
+                                    &peer.nickname[..usize::from(peer.nickname_len)],
+                                ));
+                                let control = &view.controls[usize::from(peer.peer_id) - 1];
+                                let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
+                                let mut db = gain_to_db(gain);
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut db, -60.0..=6.0)
+                                            .vertical()
+                                            .suffix(" dB"),
+                                    )
+                                    .changed()
+                                {
+                                    control
+                                        .gain
+                                        .store(db_to_gain(db).to_bits(), Ordering::Relaxed);
+                                }
+                                let mut mute = control.mute.load(Ordering::Relaxed);
+                                let mut solo = control.solo.load(Ordering::Relaxed);
+                                if ui.toggle_value(&mut mute, "M · Mute").changed() {
+                                    control.mute.store(mute, Ordering::Relaxed);
+                                }
+                                if ui.toggle_value(&mut solo, "S · Solo").changed() {
+                                    control.solo.store(solo, Ordering::Relaxed);
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+        });
+    }
+
     fn refresh(&mut self) {
         self.error = None;
         self.loading = self.command(Command::Refresh(self.preferences.clone()));
@@ -296,6 +357,7 @@ impl eframe::App for AppState {
                     });
                 }
                 self.connection(ui);
+                self.mixer(ui);
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
@@ -326,5 +388,28 @@ impl Drop for AppState {
     fn drop(&mut self) {
         let pending = self.changed_at.map(|_| self.preferences.clone());
         self.controller.shutdown(pending);
+    }
+}
+
+fn db_to_gain(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
+fn gain_to_db(gain: f32) -> f32 {
+    (20.0 * gain.log10()).clamp(-60.0, 6.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fader_conversion_covers_unity_and_endpoints() {
+        assert!((db_to_gain(-60.0) - 0.001).abs() < 0.000001);
+        assert_eq!(db_to_gain(0.0), 1.0);
+        assert!((db_to_gain(6.0) - 1.995_262).abs() < 0.000001);
+        for db in [-60.0, -30.0, 0.0, 6.0] {
+            assert!((gain_to_db(db_to_gain(db)) - db).abs() < 0.00001);
+        }
     }
 }

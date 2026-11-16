@@ -49,6 +49,8 @@ struct Delayed {
 }
 
 pub struct Network {
+    roster: Vec<jam_protocol::PeerInfo>,
+    roster_changed: bool,
     encoder: opus::Encoder,
     settings: Settings,
     peers: BTreeMap<u8, PeerJitterBuffer>,
@@ -82,6 +84,8 @@ impl Network {
         bytes[..nickname.len()].copy_from_slice(nickname.as_bytes());
         let now = Instant::now();
         Ok(Self {
+            roster: Vec::new(),
+            roster_changed: false,
             encoder: codec::encoder().map_err(io::Error::other)?,
             settings: Settings::default(),
             peers: BTreeMap::new(),
@@ -101,6 +105,40 @@ impl Network {
             last_ping: now,
             last_server: now,
         })
+    }
+
+    fn update_roster(&mut self, peers: &[jam_protocol::PeerInfo], speaker: &RxChannels) {
+        let remote: Vec<_> = peers
+            .iter()
+            .copied()
+            .filter(|peer| Some(peer.peer_id) != self.peer_id)
+            .collect();
+        if remote != self.roster {
+            for old in &self.roster {
+                if !remote.contains(old) {
+                    speaker.remove(old.peer_id);
+                }
+            }
+            self.roster = remote;
+            self.roster_changed = true;
+        }
+        self.peers.retain(|id, _| {
+            let keep = peers.iter().any(|p| p.peer_id == *id);
+            if !keep {
+                speaker.remove(*id);
+            }
+            keep
+        });
+        self.delayed
+            .retain(|packet| peers.iter().any(|p| p.peer_id == packet.peer));
+    }
+
+    pub fn take_roster(&mut self) -> Option<Vec<jam_protocol::PeerInfo>> {
+        if std::mem::take(&mut self.roster_changed) {
+            Some(self.roster.clone())
+        } else {
+            None
+        }
     }
 
     pub fn configure(mut self, settings: Settings) -> Self {
@@ -254,19 +292,12 @@ impl Network {
                         if self.peer_id.is_none() {
                             println!("Joined server as peer {assigned_peer_id}");
                         }
+                        self.roster_changed |= self.peer_id.is_none();
                         self.peer_id = Some(assigned_peer_id);
                         self.last_server = now;
                     }
                     ControlMessage::PeerListUpdate { peers } if self.peer_id.is_some() => {
-                        self.peers.retain(|id, _| {
-                            let keep = peers.iter().any(|p| p.peer_id == *id);
-                            if !keep {
-                                speaker.remove(*id);
-                            }
-                            keep
-                        });
-                        self.delayed
-                            .retain(|packet| peers.iter().any(|p| p.peer_id == packet.peer));
+                        self.update_roster(&peers, speaker);
                         self.last_server = now;
                     }
                     ControlMessage::Pong { .. } if self.peer_id.is_some() => {

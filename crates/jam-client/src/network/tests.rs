@@ -539,3 +539,39 @@ fn capture_blocks_are_reframed_without_sample_loss_and_invalid_samples_are_sanit
     assert_eq!(mic.slots(), 0);
     assert_eq!(network.sequence, 16);
 }
+
+#[test]
+fn roster_tracks_silent_peers_and_resets_departed_controls() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "local").unwrap();
+    network.peer_id = Some(1);
+    let (speaker, _) = crate::mixer::channels();
+    let peer = |id, name| jam_protocol::PeerInfo {
+        peer_id: id,
+        nickname: [name; NICKNAME_CAPACITY],
+        nickname_len: 1,
+    };
+    let local = peer(1, b'L');
+    let remote = peer(2, b'G');
+    network.update_roster(&[local, remote], &speaker);
+    assert_eq!(network.take_roster(), Some(vec![remote]));
+    assert!(network.take_roster().is_none());
+    network.update_roster(&[local, remote], &speaker);
+    assert!(network.take_roster().is_none());
+    // A silent musician may already have UI settings before sending any audio.
+    speaker.controls[1].solo.store(true, Ordering::Relaxed);
+    speaker.controls[1].mute.store(true, Ordering::Relaxed);
+    speaker.controls[1]
+        .gain
+        .store(0.5_f32.to_bits(), Ordering::Relaxed);
+    network.update_roster(&[local], &speaker);
+    assert_eq!(network.take_roster(), Some(vec![]));
+    assert!(!speaker.controls[1].solo.load(Ordering::Relaxed));
+    assert!(!speaker.controls[1].mute.load(Ordering::Relaxed));
+    assert_eq!(
+        f32::from_bits(speaker.controls[1].gain.load(Ordering::Relaxed)),
+        1.0
+    );
+    network.update_roster(&[local, peer(2, b'B')], &speaker);
+    assert_eq!(network.take_roster(), Some(vec![peer(2, b'B')]));
+}

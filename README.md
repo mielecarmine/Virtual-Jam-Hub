@@ -458,3 +458,23 @@ mantengono esclusivamente ring `rtrb` e atomici. I test coprono persistenza,
 validazione, selezione dei buffer, cicli di connessione, rilascio delle sessioni,
 recupero dagli errori e timeout/`Leave` UDP. La selezione di una scheda USB fisica
 e l'ascolto con due musicisti richiedono una verifica manuale sull'hardware.
+
+
+### 13. Mixer visivo — JAM-14
+
+Dopo la connessione, “Il tuo mix in cuffia” mostra una strip per ogni musicista
+remoto presente nella lista della stanza, anche prima che invii audio. Le strip
+appaiono e scompaiono agli aggiornamenti della lista; la disconnessione le rimuove.
+
+Ogni strip mostra nickname, fader verticale da −60 a +6 dB (0 dB = gain 1),
+Mute e Solo. Più Solo possono essere attivi insieme; Mute prevale su Solo.
+−60 dB attenua il segnale a 0,001: per silenziarlo completamente usare Mute.
+Le modifiche agiscono solo sul proprio ascolto, tramite gli atomici del mixer.
+Il monitoraggio locale resta disabilitato, quindi non è presente una strip locale.
+Le impostazioni dei peer sono temporanee e tornano ai valori iniziali alla loro
+uscita o alla riconnessione.
+
+Verifica manuale: connettere due o più client, variare i fader, attivare Solo e
+Mute, poi disconnettere e riconnettere un peer verificando strip e reset dei
+controlli. I test automatici coprono conversione dB/gain, aggiornamenti della
+lista, reset dei peer e applicazione dei controlli sull'audio già accodato.

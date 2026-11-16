@@ -1,5 +1,11 @@
 See `.rust-skills/AGENTS.md` for Rust development guidelines.
 
+## Board dei ticket
+
+I ticket JAM sono nella [GitHub Projects JAM board](https://github.com/users/mielecarmine/projects/4)
+collegata a questa repository. Cercarli tramite il prefisso nel titolo delle issue
+(es. JAM-14 è la issue #29), non in Linear: Linear non contiene i ticket del progetto.
+
 ## Flusso obbligatorio per i ticket JAM
 
 Quando l'utente chiede di partire con un nuovo ticket, seguire sempre questo ordine:
