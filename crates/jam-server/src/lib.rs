@@ -1,4 +1,4 @@
-//! UDP room membership and watchdog for the headless Virtual Jam server.
+//! UDP audio reflector, room membership and watchdog for the headless Virtual Jam server.
 
 mod session;
 
@@ -19,6 +19,7 @@ pub struct Server {
     socket: UdpSocket,
     sessions: SessionTable,
     started: Instant,
+    last_reflection_duration: Option<Duration>,
 }
 
 impl Server {
@@ -33,6 +34,7 @@ impl Server {
             socket,
             sessions: SessionTable::default(),
             started: Instant::now(),
+            last_reflection_duration: None,
         })
     }
 
@@ -42,6 +44,14 @@ impl Server {
     /// Returns the underlying socket address query error.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
+    }
+
+    /// Time from the last audio receive to completion of its forwarding attempts.
+    /// Includes validation and watchdog work, but excludes waiting for a packet.
+    /// Returns `None` when the latest poll did not accept an audio frame.
+    #[must_use]
+    pub const fn last_reflection_duration(&self) -> Option<Duration> {
+        self.last_reflection_duration
     }
 
     /// Receives at most one datagram and scans the watchdog on every iteration.
@@ -56,6 +66,7 @@ impl Server {
         let mut buffer = [0; MAX_PACKET_SIZE];
         let received = self.socket.recv_from(&mut buffer);
         let now = Instant::now();
+        self.last_reflection_duration = None;
         if self.sessions.expire(now) {
             self.broadcast_peers();
         }
@@ -78,8 +89,18 @@ impl Server {
 
     fn handle(&mut self, packet: &[u8], source: SocketAddr, now: Instant) {
         if let Ok(header) = AudioHeader::from_bytes(packet) {
-            self.sessions.touch(source, header.peer_id, now);
-            // Packet reflection is implemented separately from room membership.
+            if self.sessions.touch(source, header.peer_id, now) {
+                for destination in self
+                    .sessions
+                    .addresses()
+                    .filter(|address| *address != source)
+                {
+                    if let Err(error) = self.socket.send_to(packet, destination) {
+                        eprintln!("UDP audio to {destination} failed: {error}");
+                    }
+                }
+                self.last_reflection_duration = Some(now.elapsed());
+            }
             return;
         }
         let Ok(message) = ControlMessage::from_bytes(packet) else {

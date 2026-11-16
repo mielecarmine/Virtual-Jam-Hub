@@ -57,12 +57,14 @@ impl SessionTable {
         false
     }
 
-    pub(super) fn touch(&mut self, source: SocketAddr, peer_id: u8, now: Instant) {
+    pub(super) fn touch(&mut self, source: SocketAddr, peer_id: u8, now: Instant) -> bool {
         if let Some(session) = self.clients.get_mut(&source) {
             if session.peer_id == peer_id {
                 session.last_seen = now;
+                return true;
             }
         }
+        false
     }
 
     pub(super) fn remove(&mut self, source: SocketAddr, peer_id: u8) -> bool {

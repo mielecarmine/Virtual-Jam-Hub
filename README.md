@@ -111,10 +111,25 @@ per mantenere attiva la sessione; i `Ping` ricevono un `Pong`. Dopo oltre 5 seco
 di inattività il server rimuove il peer e libera il suo ID. I datagrammi malformati,
 di almeno 1400 byte o con ID non corrispondente all'endpoint non rinnovano la sessione.
 Quando la stanza è piena, i nuovi ingressi vengono ignorati: il protocollo attuale
-non definisce un messaggio di rifiuto. L'inoltro audio è previsto dal ticket JAM-5.
+non definisce un messaggio di rifiuto.
+
+Ogni pacchetto audio valido viene inoltrato, senza modificare header o payload,
+a tutti gli altri peer attivi. Il mittente non riceve il proprio audio.
+L'ID nell'header deve coincidere con quello assegnato all'endpoint UDP: i pacchetti
+con ID contraffatto vengono scartati senza aggiornare il watchdog.
 
 I test del server usano socket UDP locali su porte effimere:
 
 ```bash
 cargo test -p jam-server
+```
+
+Il gate di latenza si esegue separatamente in release su una macchina scarica:
+verifica 500 frame con 5 peer attivi e richiede un massimo inferiore a 200 µs.
+La misura con `Instant` parte subito dopo `recv_from` e termina dopo l'ultimo
+tentativo di `send_to`, includendo validazione e watchdog; esclude l'attesa di rete.
+`Server::last_reflection_duration()` espone questa durata per l'ultimo poll audio.
+
+```bash
+cargo test --release -p jam-server --test udp_reflector five_peer_forwarding_stays_below_200_microseconds -- --ignored --nocapture
 ```

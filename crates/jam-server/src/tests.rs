@@ -69,6 +69,9 @@ fn only_valid_client_packets_refresh_sessions() {
     handle(&mut server, &join(), source, now);
     let later = now + Duration::from_secs(4);
     server.handle(&[0; 16], source, later);
+    let mut spoofed = [0; 120];
+    AudioHeader::new(2, 0, 0).to_bytes(&mut spoofed).unwrap();
+    server.handle(&spoofed, source, later);
     handle(
         &mut server,
         &ControlMessage::JoinAccepted {
@@ -123,10 +126,12 @@ fn watchdog_expires_sessions_even_without_incoming_packets() {
         source(1),
         [0; NICKNAME_CAPACITY],
         0,
-        Instant::now() - SESSION_TIMEOUT - Duration::from_millis(1),
+        Instant::now()
+            .checked_sub(SESSION_TIMEOUT + Duration::from_millis(1))
+            .unwrap(),
     );
     server.poll().unwrap();
-    assert!(server.sessions.peers().is_empty());
+    assert_eq!(server.sessions.peers(), Vec::new());
 }
 
 #[test]
@@ -140,6 +145,48 @@ fn oversized_and_malformed_datagrams_cannot_register_clients() {
     for length in [MAX_PACKET_SIZE, MAX_PACKET_SIZE + 100, 2] {
         client.send(&packet[..length]).unwrap();
         server.poll().unwrap();
-        assert!(server.sessions.peers().is_empty());
+        assert_eq!(server.sessions.peers(), Vec::new());
+    }
+}
+
+#[test]
+fn expired_peer_cannot_send_or_receive_audio() {
+    let mut server = Server::bind("127.0.0.1:0").unwrap();
+    let active = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let expired = UdpSocket::bind("127.0.0.1:0").unwrap();
+    active.connect(server.local_addr().unwrap()).unwrap();
+    expired.connect(server.local_addr().unwrap()).unwrap();
+    active.set_nonblocking(true).unwrap();
+    expired.set_nonblocking(true).unwrap();
+    let now = Instant::now();
+    server
+        .sessions
+        .join(active.local_addr().unwrap(), [0; NICKNAME_CAPACITY], 0, now);
+    server.sessions.join(
+        expired.local_addr().unwrap(),
+        [0; NICKNAME_CAPACITY],
+        0,
+        now.checked_sub(SESSION_TIMEOUT + Duration::from_secs(1))
+            .unwrap(),
+    );
+    let mut packet = [0; 120];
+    AudioHeader::new(2, 0, 0).to_bytes(&mut packet).unwrap();
+    expired.send(&packet).unwrap();
+    server.poll().unwrap();
+    assert!(server.last_reflection_duration().is_none());
+    let mut buffer = [0; MAX_PACKET_SIZE];
+    let length = active.recv(&mut buffer).unwrap();
+    assert!(matches!(
+        ControlMessage::from_bytes(&buffer[..length]).unwrap(),
+        ControlMessage::PeerListUpdate { peers } if peers.len() == 1
+    ));
+    AudioHeader::new(1, 0, 0).to_bytes(&mut packet).unwrap();
+    active.send(&packet).unwrap();
+    server.poll().unwrap();
+    for client in [&active, &expired] {
+        assert_eq!(
+            client.recv(&mut buffer).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 }
