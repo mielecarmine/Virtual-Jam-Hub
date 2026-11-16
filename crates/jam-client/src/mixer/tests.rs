@@ -105,3 +105,28 @@ fn soft_clip_is_continuous_monotonic_and_bounded_across_the_threshold() {
         previous = out[0];
     }
 }
+
+#[test]
+fn peer_peaks_are_independent_pre_fader_and_reset_on_removal() {
+    let (mut rx, mut mixer) = channels();
+    let stats = Stats::default();
+    rx.push(1, &[-0.8, 0.2]);
+    rx.push(2, &[0.3, -0.4]);
+    rx.controls[0].mute.store(true, Ordering::Relaxed);
+    rx.controls[1]
+        .gain
+        .store(0.0_f32.to_bits(), Ordering::Relaxed);
+    mixer.playback(&mut [0.0_f32; 2], 1, &stats);
+    assert_eq!(
+        f32::from_bits(rx.controls[0].peak.swap(0, Ordering::Relaxed)),
+        0.8
+    );
+    assert_eq!(
+        f32::from_bits(rx.controls[1].peak.load(Ordering::Relaxed)),
+        0.4
+    );
+    mixer.playback(&mut [0.0_f32; 2], 1, &stats);
+    assert_eq!(rx.controls[0].peak.load(Ordering::Relaxed), 0);
+    rx.remove(2);
+    assert_eq!(rx.controls[1].peak.load(Ordering::Relaxed), 0);
+}

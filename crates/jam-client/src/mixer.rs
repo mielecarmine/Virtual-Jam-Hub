@@ -11,6 +11,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::audio::{RING_CAPACITY, Stats};
 
 pub struct Controls {
+    pub peak: AtomicU32,
     /// Linear amplitude, encoded with `f32::to_bits()`. Nonfinite values are silenced.
     pub gain: AtomicU32,
     pub mute: AtomicBool,
@@ -22,6 +23,7 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            peak: AtomicU32::new(0),
             gain: AtomicU32::new(1.0_f32.to_bits()),
             mute: AtomicBool::new(false),
             solo: AtomicBool::new(false),
@@ -89,6 +91,7 @@ impl RxChannels {
         if control.epoch.load(Ordering::Relaxed) % 2 != 0 {
             control.epoch.fetch_add(1, Ordering::Relaxed);
         }
+        control.peak.store(0, Ordering::Relaxed);
         control.gain.store(1.0_f32.to_bits(), Ordering::Relaxed);
         control.mute.store(false, Ordering::Relaxed);
         control.solo.store(false, Ordering::Relaxed);
@@ -108,12 +111,18 @@ impl Mixer {
             data.fill(T::EQUILIBRIUM);
             return;
         }
+        let mut peaks = [0.0_f32; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
             let solo = self.controls.iter().any(|c| {
                 c.epoch.load(Ordering::Relaxed) % 2 != 0 && c.solo.load(Ordering::Relaxed)
             });
             let mut sum = 0.0;
-            for (ring, control) in self.rings.iter_mut().zip(self.controls.iter()) {
+            for ((ring, control), peak) in self
+                .rings
+                .iter_mut()
+                .zip(self.controls.iter())
+                .zip(peaks.iter_mut())
+            {
                 let epoch = control.epoch.load(Ordering::Relaxed);
                 // Bounded by the queue capacity, including stale samples after a disconnect.
                 let mut sample = None;
@@ -132,6 +141,9 @@ impl Mixer {
                     stats.output_underflows.fetch_add(1, Ordering::Relaxed);
                     0.0
                 });
+                if value.is_finite() {
+                    *peak = peak.max(value.abs());
+                }
                 stats.playback_started.store(true, Ordering::Relaxed);
                 let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
                 if gain.is_finite()
@@ -145,6 +157,9 @@ impl Mixer {
             #[allow(clippy::cast_possible_truncation)]
             let output = sum.tanh() as f32;
             frame.fill(T::from_sample(output));
+        }
+        for (control, peak) in self.controls.iter().zip(peaks) {
+            control.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
         }
     }
 }

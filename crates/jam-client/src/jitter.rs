@@ -22,6 +22,10 @@ pub struct PeerJitterBuffer {
 }
 
 impl PeerJitterBuffer {
+    pub fn buffered_ms(&self) -> f64 {
+        f64::from(u32::try_from(self.slots.iter().filter(|s| s.is_some()).count()).unwrap_or(0))
+            * 2.5
+    }
     pub fn new(sequence: u32, now: Instant, target: usize) -> opus::Result<Self> {
         Ok(Self {
             slots: vec![None; CAPACITY].into_boxed_slice(),
