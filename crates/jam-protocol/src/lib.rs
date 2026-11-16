@@ -3,7 +3,9 @@
 mod audio;
 mod control;
 
-pub use audio::{AUDIO_HEADER_SIZE, AUDIO_PACKET_TYPE, AudioHeader};
+pub use audio::{
+    AUDIO_HEADER_SIZE, AUDIO_PACKET_TYPE, AudioHeader, STREAM_PRIMARY, STREAM_TALKBACK,
+};
 pub use control::{ControlMessage, NICKNAME_CAPACITY, PeerInfo, ProtocolError};
 
 /// Audio sample rate in samples per second.

@@ -2,7 +2,10 @@ use std::io;
 use std::net::UdpSocket;
 use std::time::Duration;
 
-use jam_protocol::{AudioHeader, ControlMessage, MAX_PACKET_SIZE, NICKNAME_CAPACITY};
+use jam_protocol::{
+    AudioHeader, ControlMessage, MAX_PACKET_SIZE, NICKNAME_CAPACITY, STREAM_PRIMARY,
+    STREAM_TALKBACK,
+};
 use jam_server::Server;
 
 struct Room {
@@ -83,9 +86,14 @@ fn receive_control(socket: &UdpSocket) -> ControlMessage {
 
 fn audio(peer_id: u8, sequence: u32, length: usize) -> Vec<u8> {
     let mut packet = vec![0xa5; length];
-    AudioHeader::new(peer_id, sequence, sequence.wrapping_mul(120))
-        .to_bytes(&mut packet)
-        .unwrap();
+    AudioHeader::new(
+        peer_id,
+        STREAM_PRIMARY,
+        sequence,
+        u16::try_from(sequence.wrapping_mul(120) & 0xffff).unwrap(),
+    )
+    .to_bytes(&mut packet)
+    .unwrap();
     packet
 }
 
@@ -99,6 +107,18 @@ fn five_peers_receive_exact_audio_bytes_without_echo_or_duplicates() {
                 room.reflect(sender, &packet);
             }
         }
+    }
+}
+
+#[test]
+fn reflects_independent_streams_from_the_same_peer_unchanged() {
+    let mut room = Room::new(3);
+    for stream_id in [STREAM_PRIMARY, STREAM_TALKBACK] {
+        let mut packet = audio(1, 42, 120);
+        let mut header = AudioHeader::from_bytes(&packet).unwrap();
+        header.stream_id = stream_id;
+        header.to_bytes(&mut packet).unwrap();
+        room.reflect(0, &packet);
     }
 }
 

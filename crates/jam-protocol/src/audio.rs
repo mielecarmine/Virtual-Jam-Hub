@@ -12,10 +12,18 @@ pub const AUDIO_HEADER_SIZE: usize = 12;
 /// Wire discriminator for an audio frame.
 pub const AUDIO_PACKET_TYPE: u8 = 0x01;
 
+/// Primary instrument stream within a peer.
+pub const STREAM_PRIMARY: u8 = 0;
+
+/// Secondary voice/talkback stream within a peer.
+pub const STREAM_TALKBACK: u8 = 1;
+
 /// Header shared by every audio frame, with a deterministic 12-byte C layout.
 ///
-/// Sequence numbers and sample timestamps wrap modulo 2^32. Senders must advance
-/// them with `wrapping_add`; consumers must account for wraparound when ordering.
+/// Sequence numbers wrap modulo 2^32; sample timestamps wrap modulo 2^16.
+/// Senders must use `wrapping_add`; consumers must account for wraparound.
+/// Stream and reserved bytes follow the timestamp to avoid implicit C padding.
+/// Wire offsets: magic 0, type 2, peer 3, sequence 4, timestamp 8, stream 10, reserved 11.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct AudioHeader {
@@ -23,21 +31,33 @@ pub struct AudioHeader {
     pub packet_type: u8,
     pub peer_id: u8,
     pub sequence_number: u32,
-    pub timestamp_samples: u32,
+    pub timestamp_samples: u16,
+    pub stream_id: u8,
+    pub reserved: u8,
 }
 
-const _: () = assert!(size_of::<AudioHeader>() == AUDIO_HEADER_SIZE);
+const _: () = {
+    assert!(size_of::<AudioHeader>() == AUDIO_HEADER_SIZE);
+    assert!(align_of::<AudioHeader>() == 4);
+};
 
 impl AudioHeader {
     /// Creates an audio header. Peer IDs are validated when encoding.
     #[must_use]
-    pub const fn new(peer_id: u8, sequence_number: u32, timestamp_samples: u32) -> Self {
+    pub const fn new(
+        peer_id: u8,
+        stream_id: u8,
+        sequence_number: u32,
+        timestamp_samples: u16,
+    ) -> Self {
         Self {
             magic: PROTOCOL_MAGIC.to_le_bytes(),
             packet_type: AUDIO_PACKET_TYPE,
             peer_id,
             sequence_number,
             timestamp_samples,
+            stream_id,
+            reserved: 0,
         }
     }
 
@@ -65,7 +85,9 @@ impl AudioHeader {
         buf[2] = self.packet_type;
         buf[3] = self.peer_id;
         buf[4..8].copy_from_slice(&self.sequence_number.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.timestamp_samples.to_le_bytes());
+        buf[8..10].copy_from_slice(&self.timestamp_samples.to_le_bytes());
+        buf[10] = self.stream_id;
+        buf[11] = self.reserved;
         Ok(AUDIO_HEADER_SIZE)
     }
 
@@ -86,7 +108,9 @@ impl AudioHeader {
             packet_type: buf[2],
             peer_id: buf[3],
             sequence_number: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
-            timestamp_samples: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            timestamp_samples: u16::from_le_bytes([buf[8], buf[9]]),
+            stream_id: buf[10],
+            reserved: buf[11],
         };
         header.validate()?;
         Ok(header)

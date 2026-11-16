@@ -1,10 +1,17 @@
-use crate::{AUDIO_HEADER_SIZE, AudioHeader, MAX_PACKET_SIZE, ProtocolError};
+use crate::{
+    AUDIO_HEADER_SIZE, AudioHeader, MAX_PACKET_SIZE, ProtocolError, STREAM_PRIMARY, STREAM_TALKBACK,
+};
 
 #[test]
 fn header_has_fixed_size_and_explicit_little_endian_wire_layout() {
     assert_eq!(size_of::<AudioHeader>(), 12);
-    let header = AudioHeader::new(8, 0x0403_0201, 0x0807_0605);
-    let expected = [0x41, 0x4A, 0x01, 8, 1, 2, 3, 4, 5, 6, 7, 8];
+    assert_eq!(align_of::<AudioHeader>(), 4);
+    assert_eq!(std::mem::offset_of!(AudioHeader, sequence_number), 4);
+    assert_eq!(std::mem::offset_of!(AudioHeader, timestamp_samples), 8);
+    assert_eq!(std::mem::offset_of!(AudioHeader, stream_id), 10);
+    assert_eq!(std::mem::offset_of!(AudioHeader, reserved), 11);
+    let header = AudioHeader::new(8, STREAM_PRIMARY, 0x0403_0201, 0x0605);
+    let expected = [0x41, 0x4A, 0x01, 8, 1, 2, 3, 4, 5, 6, STREAM_PRIMARY, 0];
     let mut wire = [0; AUDIO_HEADER_SIZE];
     assert_eq!(header.to_bytes(&mut wire), Ok(12));
     assert_eq!(wire, expected);
@@ -15,11 +22,19 @@ fn header_has_fixed_size_and_explicit_little_endian_wire_layout() {
 fn headers_round_trip_including_counter_boundaries() {
     for peer_id in 1..=8 {
         for sequence_number in [0, 1, u32::MAX - 1, u32::MAX] {
-            for timestamp_samples in [0, 120, u32::MAX] {
-                let header = AudioHeader::new(peer_id, sequence_number, timestamp_samples);
-                let mut wire = [0; AUDIO_HEADER_SIZE];
-                header.to_bytes(&mut wire).unwrap();
-                assert_eq!(AudioHeader::from_bytes(&wire), Ok(header));
+            for timestamp_samples in [0, 120, u16::MAX] {
+                for stream_id in [STREAM_PRIMARY, STREAM_TALKBACK, u8::MAX] {
+                    let mut header =
+                        AudioHeader::new(peer_id, stream_id, sequence_number, timestamp_samples);
+                    for reserved in [0, u8::MAX] {
+                        header.reserved = reserved;
+                        let mut wire = [0; AUDIO_HEADER_SIZE];
+                        header.to_bytes(&mut wire).unwrap();
+                        assert_eq!(wire[10], stream_id);
+                        assert_eq!(wire[11], reserved);
+                        assert_eq!(AudioHeader::from_bytes(&wire), Ok(header));
+                    }
+                }
             }
         }
     }
@@ -27,7 +42,7 @@ fn headers_round_trip_including_counter_boundaries() {
 
 #[test]
 fn sequence_and_sample_clocks_wrap_without_panicking() {
-    let mut header = AudioHeader::new(1, u32::MAX, u32::MAX - 119);
+    let mut header = AudioHeader::new(1, STREAM_PRIMARY, u32::MAX, u16::MAX - 119);
     for expected in [u32::MAX, 0, 1] {
         let mut wire = [0; AUDIO_HEADER_SIZE];
         header.to_bytes(&mut wire).unwrap();
@@ -42,7 +57,7 @@ fn sequence_and_sample_clocks_wrap_without_panicking() {
 
 #[test]
 fn every_truncated_input_and_short_output_is_rejected() {
-    let header = AudioHeader::new(1, 7, 120);
+    let header = AudioHeader::new(1, STREAM_PRIMARY, 7, 120);
     let mut wire = [0; AUDIO_HEADER_SIZE];
     header.to_bytes(&mut wire).unwrap();
     for length in 0..AUDIO_HEADER_SIZE {
@@ -61,7 +76,7 @@ fn every_truncated_input_and_short_output_is_rejected() {
 
 #[test]
 fn payload_is_preserved_and_unaligned_input_is_supported() {
-    let header = AudioHeader::new(2, 123, 456);
+    let header = AudioHeader::new(2, STREAM_PRIMARY, 123, 456);
     let mut storage = [0xCC; MAX_PACKET_SIZE];
     // Offset by one byte so parsing cannot rely on native u32 alignment.
     assert_eq!(header.to_bytes(&mut storage[1..]), Ok(AUDIO_HEADER_SIZE));
@@ -80,7 +95,7 @@ fn payload_is_preserved_and_unaligned_input_is_supported() {
 
 #[test]
 fn invalid_fields_are_rejected_on_both_read_and_write() {
-    let valid = AudioHeader::new(1, 0, 0);
+    let valid = AudioHeader::new(1, STREAM_PRIMARY, 0, 0);
     let mut cases = vec![
         (
             AudioHeader {
