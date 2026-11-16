@@ -512,3 +512,15 @@ Per la verifica manuale, connettere due client GUI, suonare segnali di intensit√
 variabile e controllare movimento fluido, marker di picco, mute/fader e reset
 alla riconnessione. La fluidit√† effettiva a 60 fps e la sincronia con una scheda
 audio fisica richiedono questa prova sul desktop.
+
+### Release beta e installer
+
+Gli installer desktop sono disponibili nelle [release GitHub](https://github.com/mielecarmine/Virtual-Jam-Hub/releases).
+La beta `1.0.0-beta-1` copre Windows x64 (`.exe`), Linux amd64 (`.deb`)
+e macOS Intel/Apple Silicon (`.pkg`). Requisiti e limiti sono descritti nelle
+[note della beta](packaging/RELEASE-NOTES.md).
+
+La pipeline `.github/workflows/release.yml` esegue fmt, clippy, test, build release
+e installazione di prova su ogni piattaforma. I branch `codex/release-*` producono
+artefatti di verifica; un tag `1.*-beta-*` uguale alla versione Cargo pubblica la
+prerelease solo dopo il successo di tutte e quattro le build, con checksum SHA-256.
