@@ -29,6 +29,9 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -39,6 +42,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          Invoke-WebRequest https://www.steinberg.net/asiosdk -OutFile "$env:RUNNER_TEMP/asio.zip"
+          python -m zipfile -e "$env:RUNNER_TEMP/asio.zip" "$env:RUNNER_TEMP/asio"
+          $header = Get-ChildItem "$env:RUNNER_TEMP/asio" -Recurse -Filter asiodrivers.h | Select-Object -First 1
+          if (-not $header) { throw 'ASIO SDK headers missing' }
+          $sdk = $header.Directory.Parent.FullName
+          if (-not (Test-Path "$sdk/common/asio.h")) { throw 'Unexpected ASIO SDK layout' }
+          "CPAL_ASIO_DIR=$sdk" >> $env:GITHUB_ENV
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           "RUSTFLAGS=-C target-feature=+crt-static" >> $env:GITHUB_ENV
       - name: Read and validate version

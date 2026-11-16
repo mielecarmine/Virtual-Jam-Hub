@@ -25,6 +25,26 @@ fn send_control(socket: &UdpSocket, destination: SocketAddr, message: &ControlMe
     socket.send_to(&bytes[..len], destination).unwrap();
 }
 
+// UDP send completion does not guarantee receive readiness, even on loopback.
+// Keep the simulated tick timestamp deterministic while waiting for the OS.
+fn wait_for_datagram(socket: &UdpSocket) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match socket.peek(&mut [0; MAX_PACKET_SIZE]) {
+            Ok(_) => return,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for test datagram"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => panic!("cannot wait for test datagram: {error}"),
+        }
+    }
+}
+
 #[test]
 fn join_timeout_is_reported_and_disconnect_sends_leave_after_acceptance() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -58,6 +78,7 @@ fn join_timeout_is_reported_and_disconnect_sends_leave_after_acceptance() {
                 sample_rate: SAMPLE_RATE,
             },
         );
+        wait_for_datagram(&network.socket);
         network
             .tick(&mut mic, &mut speaker, Instant::now())
             .unwrap();
@@ -104,6 +125,7 @@ fn retries_join_sends_heartbeat_frames_and_wraps_counters() {
             sample_rate: SAMPLE_RATE,
         },
     );
+    wait_for_datagram(&network.socket);
     network
         .tick(&mut mic, &mut speaker, start + JOIN_INTERVAL)
         .unwrap();
@@ -190,6 +212,7 @@ fn rejects_wrong_sample_rate_and_ignores_foreign_endpoint() {
             sample_rate: 44100,
         },
     );
+    wait_for_datagram(&network.socket);
     assert!(
         network
             .tick(&mut mic, &mut speaker, Instant::now())
@@ -597,6 +620,7 @@ fn telemetry_matches_ping_and_publishes_every_half_second() {
             server_timestamp_us: 0,
         },
     );
+    wait_for_datagram(&network.socket);
     network
         .tick(&mut mic, &mut rx, start + Duration::from_millis(1010))
         .unwrap();
@@ -609,6 +633,7 @@ fn telemetry_matches_ping_and_publishes_every_half_second() {
             server_timestamp_us: 0,
         },
     );
+    wait_for_datagram(&network.socket);
     network
         .tick(&mut mic, &mut rx, start + Duration::from_millis(1020))
         .unwrap();
