@@ -1,6 +1,8 @@
 //! Local hardware loopback: capture -> `mic_to_net` -> worker -> `net_to_speaker` -> playback.
 
 mod audio;
+mod cli;
+mod streams;
 
 use std::{
     error::Error,
@@ -14,39 +16,41 @@ use std::{
 };
 
 use audio::{RING_CAPACITY, Stats};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use rtrb::RingBuffer;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let Some(duration) = parse_duration()? else {
+    let Some(options) = cli::Options::parse(std::env::args().skip(1))? else {
         return Ok(());
     };
-    let host = cpal::default_host();
-    let input = host.default_input_device().ok_or_else(|| {
-        io::Error::other("No default audio input device. Connect an audio interface first.")
-    })?;
-    let output = host.default_output_device().ok_or_else(|| {
-        io::Error::other("No default audio output device. Connect an audio interface first.")
-    })?;
+    let host = cli::host(options.host.as_deref())?;
+    if options.list {
+        return cli::list_devices(&host);
+    }
+    let (input, output) = cli::devices(&host, options.input.as_deref(), options.output.as_deref())?;
     let input_config = audio::select_config(input.supported_input_configs()?)
-        .ok_or_else(|| io::Error::other("Input does not support f32 / 48000 Hz / 128 frames"))?;
+        .ok_or_else(|| io::Error::other("Input does not support 48000 Hz / 128 frames"))?;
     let output_config = audio::select_config(output.supported_output_configs()?)
-        .ok_or_else(|| io::Error::other("Output does not support f32 / 48000 Hz / 128 frames"))?;
-
+        .ok_or_else(|| io::Error::other("Output does not support 48000 Hz / 128 frames"))?;
+    println!("Backend: {}", host.id().name());
     println!(
-        "Input: {} ({} channels)",
+        "Input: {} ({} channels, {})",
         input.name()?,
-        input_config.channels
+        input_config.stream.channels,
+        input_config.format
     );
     println!(
-        "Output: {} ({} channels)",
+        "Output: {} ({} channels, {})",
         output.name()?,
-        output_config.channels
+        output_config.stream.channels,
+        output_config.format
     );
-    println!("48000 Hz, f32, 128 frames; channel 1 -> all outputs; two 4096-sample rings.");
+    println!(
+        "48000 Hz, 128 frames; internal f32; channel 1 -> all outputs; two 4096-sample rings."
+    );
     println!(
         "Use headphones. Running for {} seconds; Ctrl+C stops early.",
-        duration.as_secs()
+        options.duration.as_secs()
     );
 
     // Allocate shared state and ring storage before starting either audio stream.
@@ -54,41 +58,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stop = Arc::new(AtomicBool::new(false));
     let signal_stop = Arc::clone(&stop);
     ctrlc::set_handler(move || signal_stop.store(true, Ordering::Relaxed))?;
-    let (mut mic_producer, mut mic_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
-    let (mut speaker_producer, mut speaker_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
-
-    let input_stats = Arc::clone(&stats);
-    let input_errors = Arc::clone(&stats);
-    let input_channels = usize::from(input_config.channels);
-    let input_stream = input.build_input_stream(
-        &input_config,
-        move |data: &[f32], _| {
-            audio::capture(data, input_channels, &mut mic_producer, &input_stats);
-        },
-        move |_| {
-            input_errors.input_errors.fetch_add(1, Ordering::Relaxed);
-        },
-        None,
-    )?;
-    let output_stats = Arc::clone(&stats);
-    let output_errors = Arc::clone(&stats);
-    let output_channels = usize::from(output_config.channels);
-    let mut started = false;
-    let output_stream = output.build_output_stream(
+    let (mic_producer, mut mic_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
+    let (mut speaker_producer, speaker_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
+    let input_stream = streams::input(&input, &input_config, mic_producer, Arc::clone(&stats))?;
+    let output_stream = streams::output(
+        &output,
         &output_config,
-        move |data: &mut [f32], _| {
-            audio::playback(
-                data,
-                output_channels,
-                &mut speaker_consumer,
-                &mut started,
-                &output_stats,
-            );
-        },
-        move |_| {
-            output_errors.output_errors.fetch_add(1, Ordering::Relaxed);
-        },
-        None,
+        speaker_consumer,
+        Arc::clone(&stats),
     )?;
 
     // Stop and join the scoped worker even if stream startup fails.
@@ -103,7 +80,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     thread::sleep(Duration::from_micros(250));
                 }
             })?;
-        let result = run_streams(&input_stream, &output_stream, duration, &stats, &stop);
+        let result = run_streams(
+            &input_stream,
+            &output_stream,
+            options.duration,
+            &stats,
+            &stop,
+        );
         // Stop callbacks before stopping their producer to avoid shutdown-only underruns.
         drop(output_stream);
         drop(input_stream);
@@ -168,28 +151,4 @@ fn report(stats: &Stats) {
         stats.output_errors.load(Ordering::Relaxed),
         stats.wrong_buffer_sizes.load(Ordering::Relaxed),
     );
-}
-
-fn parse_duration() -> Result<Option<Duration>, Box<dyn Error>> {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        None => Ok(Some(Duration::from_secs(300))),
-        Some("--help" | "-h") => {
-            println!(
-                "Usage: jam-client [--seconds N]\nDefault: 300 seconds of local hardware loopback."
-            );
-            Ok(None)
-        }
-        Some("--seconds") => {
-            let seconds: u64 = args
-                .next()
-                .ok_or("--seconds requires a positive integer")?
-                .parse()?;
-            if seconds == 0 || args.next().is_some() {
-                return Err("Usage: jam-client [--seconds N], N > 0".into());
-            }
-            Ok(Some(Duration::from_secs(seconds)))
-        }
-        Some(_) => Err("Usage: jam-client [--seconds N]".into()),
-    }
 }

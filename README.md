@@ -182,16 +182,20 @@ Il client CLI collega l'ingresso audio all'uscita locale senza server o rete:
 cpal input -> mic_to_net -> thread local-loopback -> net_to_speaker -> cpal output
 ```
 
-Servono dispositivi di ingresso e uscita predefiniti che supportino `f32`,
+Servono dispositivi di ingresso e uscita che supportino
 48.000 Hz e un buffer fisso di **128 frame per canale** (circa 2,67 ms).
 La dimensione del buffer richiesta non impone la lunghezza di ogni callback:
 ALSA può consegnare periodi più corti o accorparli. Il client elabora tutti
 i frame ricevuti, mantenendo la richiesta `BufferSize::Fixed(128)`.
 Su Linux servono anche `pkg-config` e gli header ALSA (`libasound2-dev` su Debian/Ubuntu).
-Selezionare l'interfaccia desiderata nelle impostazioni audio del sistema prima dell'avvio.
-Il client sceglie la configurazione compatibile con meno canali: acquisisce il primo
+Senza opzioni il client usa backend e dispositivi predefiniti del sistema.
+Il client preferisce il formato `f32`, poi la configurazione con meno canali: acquisisce il primo
 canale di ingresso come segnale mono e lo riproduce su tutti i canali di uscita.
-Non effettua conversioni implicite di formato o frequenza.
+Quando il driver espone un altro formato, il client converte i campioni in `f32`
+all'ingresso e nel formato hardware all'uscita, senza allocare memoria nei callback.
+Supporta i dieci formati di campione di `cpal` 0.15 (`f32`, `f64`, interi signed/unsigned
+da 8, 16, 32 e 64 bit). La frequenza rimane 48 kHz, senza ricampionamento.
+Backend, dispositivi e formati selezionati vengono stampati all'avvio.
 
 ```bash
 # Prova di accettazione: cinque minuti effettivi dopo l'avvio della riproduzione.
@@ -201,6 +205,38 @@ cargo run --locked --release -p jam-client
 cargo run --locked --release -p jam-client -- --seconds 10
 cargo run --locked -p jam-client -- --help
 ```
+
+Per scegliere esplicitamente driver e dispositivi:
+
+```bash
+# Linux: elenca i nomi ALSA disponibili (i dispositivi occupati possono essere assenti).
+cargo run --locked --release -p jam-client -- --host alsa --list-devices
+
+# Linux: percorso ALSA/PipeWire condiviso.
+cargo run --locked --release -p jam-client -- --host alsa --input pipewire --output pipewire
+
+# Linux: hardware diretto; sostituire il nome con quello riportato dall'elenco.
+cargo run --locked --release -p jam-client -- --host alsa --input 'hw:CARD=USB,DEV=0' --output 'hw:CARD=USB,DEV=0'
+
+# Windows: elenco driver ASIO e scelta del driver Focusrite.
+cargo run --locked --release -p jam-client -- --host asio --list-devices
+cargo run --locked --release -p jam-client -- --host asio --input 'Focusrite USB ASIO' --output 'Focusrite USB ASIO'
+
+# macOS: CoreAudio; Windows offre anche --host wasapi.
+cargo run --locked --release -p jam-client -- --host coreaudio --list-devices
+```
+
+I nomi dei backend non distinguono maiuscole/minuscole; i nomi dei dispositivi
+devono coincidere esattamente con l'elenco. Una scelta non disponibile provoca
+un errore esplicito, senza ripiego su un altro dispositivo o backend.
+ASIO è abilitato nelle build Windows: per compilarlo occorrono gli strumenti
+C++ MSVC, LLVM/libclang e l'ASIO SDK richiesti da `cpal` (variabili `LIBCLANG_PATH`
+e `CPAL_ASIO_DIR`, se necessarie). Per eseguirlo serve il driver del produttore.
+ALSA diretto richiede che l'interfaccia non sia occupata da PipeWire o altre applicazioni;
+il client non arresta servizi audio automaticamente. PipeWire resta accessibile
+tramite i dispositivi ALSA `default`/`pipewire`; non è un backend nativo separato di `cpal`.
+La compatibilità del driver con 48 kHz e 128 frame è verificata prima dell'avvio.
+La verifica hardware su Windows/ASIO e macOS/CoreAudio va eseguita sui rispettivi sistemi.
 
 Usare cuffie per evitare feedback acustico. I due ring buffer `rtrb::RingBuffer<f32>`
 contengono ciascuno 4096 campioni mono; tutta la memoria viene allocata prima

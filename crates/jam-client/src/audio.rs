@@ -2,7 +2,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use cpal::{BufferSize, SampleFormat, SampleRate, StreamConfig, SupportedBufferSize};
+use cpal::{
+    BufferSize, FromSample, Sample, SampleFormat, SampleRate, StreamConfig, SupportedBufferSize,
+};
 use rtrb::{Consumer, Producer};
 
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -36,13 +38,17 @@ impl Stats {
     }
 }
 
+pub struct AudioConfig {
+    pub stream: StreamConfig,
+    pub format: SampleFormat,
+}
+
 pub fn select_config(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
-) -> Option<StreamConfig> {
+) -> Option<AudioConfig> {
     configs
         .filter(|config| {
-            config.sample_format() == SampleFormat::F32
-                && config.channels() > 0
+            config.channels() > 0
                 && config.min_sample_rate().0 <= SAMPLE_RATE
                 && config.max_sample_rate().0 >= SAMPLE_RATE
                 && match config.buffer_size() {
@@ -51,16 +57,31 @@ pub fn select_config(
                     SupportedBufferSize::Unknown => true,
                 }
         })
-        .min_by_key(cpal::SupportedStreamConfigRange::channels)
-        .map(|config| StreamConfig {
-            channels: config.channels(),
-            sample_rate: SampleRate(SAMPLE_RATE),
-            buffer_size: BufferSize::Fixed(128),
+        .min_by_key(|config| {
+            (
+                config.sample_format() != SampleFormat::F32,
+                config.channels(),
+            )
+        })
+        .map(|config| AudioConfig {
+            format: config.sample_format(),
+            stream: StreamConfig {
+                channels: config.channels(),
+                sample_rate: SampleRate(SAMPLE_RATE),
+                buffer_size: BufferSize::Fixed(128),
+            },
         })
 }
 
 /// Keep channel 1 as the mono instrument signal. Drop whole frames on overflow.
-pub fn capture(data: &[f32], channels: usize, mic_to_net: &mut Producer<f32>, stats: &Stats) {
+pub fn capture<T: Sample>(
+    data: &[T],
+    channels: usize,
+    mic_to_net: &mut Producer<f32>,
+    stats: &Stats,
+) where
+    f32: FromSample<T>,
+{
     stats.input_callbacks.fetch_add(1, Ordering::Relaxed);
     // ALSA may deliver part of the hardware buffer, or coalesce several periods.
     if channels == 0 || data.len() % channels != 0 {
@@ -68,15 +89,15 @@ pub fn capture(data: &[f32], channels: usize, mic_to_net: &mut Producer<f32>, st
         return;
     }
     for frame in data.chunks_exact(channels) {
-        if mic_to_net.push(frame[0]).is_err() {
+        if mic_to_net.push(frame[0].to_sample::<f32>()).is_err() {
             stats.input_overflows.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
 /// Duplicate mono on all output channels; an empty ring produces silence.
-pub fn playback(
-    data: &mut [f32],
+pub fn playback<T: Sample + FromSample<f32>>(
+    data: &mut [T],
     channels: usize,
     net_to_speaker: &mut Consumer<f32>,
     started: &mut bool,
@@ -85,12 +106,12 @@ pub fn playback(
     stats.output_callbacks.fetch_add(1, Ordering::Relaxed);
     if channels == 0 || data.len() % channels != 0 {
         stats.wrong_buffer_sizes.fetch_add(1, Ordering::Relaxed);
-        data.fill(0.0);
+        data.fill(T::EQUILIBRIUM);
         return;
     }
     if !*started {
         if net_to_speaker.slots() < PREFILL_SAMPLES.max(data.len() / channels) {
-            data.fill(0.0);
+            data.fill(T::EQUILIBRIUM);
             return;
         }
         *started = true;
@@ -101,7 +122,7 @@ pub fn playback(
             stats.output_underflows.fetch_add(1, Ordering::Relaxed);
             0.0
         });
-        frame.fill(sample);
+        frame.fill(T::from_sample(sample));
     }
 }
 

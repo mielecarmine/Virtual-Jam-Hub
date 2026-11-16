@@ -9,5 +9,8 @@ cpal = "0.15.3"
 ctrlc = "3.4"
 rtrb = "0.3.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { version = "0.15.3", features = ["asio"] }
+
 [lints]
 workspace = true

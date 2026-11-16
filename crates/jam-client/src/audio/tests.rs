@@ -29,19 +29,63 @@ fn selects_f32_48khz_128_frames_and_fewest_channels() {
         .into_iter(),
     )
     .expect("supported configuration");
-    assert_eq!(selected.channels, 1);
-    assert_eq!(selected.sample_rate, SampleRate(SAMPLE_RATE));
-    assert_eq!(selected.buffer_size, BufferSize::Fixed(128));
+    assert_eq!(selected.stream.channels, 1);
+    assert_eq!(selected.format, SampleFormat::F32);
+    assert_eq!(selected.stream.sample_rate, SampleRate(SAMPLE_RATE));
+    assert_eq!(selected.stream.buffer_size, BufferSize::Fixed(128));
+}
+
+fn check_hardware_format<T: cpal::SizedSample + FromSample<f32> + std::fmt::Debug + PartialEq>()
+where
+    f32: FromSample<T>,
+{
+    let stats = Stats::default();
+    let (mut mic, mut net_input) = RingBuffer::new(RING_CAPACITY);
+    let (mut net_output, mut speaker) = RingBuffer::new(RING_CAPACITY);
+    let mut input = [T::EQUILIBRIUM; PREFILL_SAMPLES * 2];
+    for (index, frame) in input.chunks_exact_mut(2).enumerate() {
+        frame[0] = T::from_sample(if index % 2 == 0 { -0.5_f32 } else { 0.5 });
+        frame[1] = T::EQUILIBRIUM;
+    }
+    capture(&input, 2, &mut mic, &stats);
+    assert_eq!(bridge(&mut net_input, &mut net_output), PREFILL_SAMPLES);
+    let mut output = [T::EQUILIBRIUM; PREFILL_SAMPLES * 2];
+    let mut started = false;
+    playback(&mut output, 2, &mut speaker, &mut started, &stats);
+    for (captured, played) in input.chunks_exact(2).zip(output.chunks_exact(2)) {
+        assert_eq!(played, &[captured[0]; 2]);
+    }
+    // Integer unsigned silence must use the midpoint, rather than zero.
+    playback(&mut output, 2, &mut speaker, &mut started, &stats);
+    assert!(output.iter().all(|sample| *sample == T::EQUILIBRIUM));
+    assert_eq!(
+        stats.output_underflows.load(Ordering::Relaxed),
+        u32::try_from(PREFILL_SAMPLES).expect("prefill fits u32")
+    );
 }
 
 #[test]
-fn rejects_incompatible_rate_format_and_buffer() {
+fn all_cpal_hardware_formats_convert_through_f32_and_use_correct_silence() {
+    check_hardware_format::<i8>();
+    check_hardware_format::<i16>();
+    check_hardware_format::<i32>();
+    check_hardware_format::<i64>();
+    check_hardware_format::<u8>();
+    check_hardware_format::<u16>();
+    check_hardware_format::<u32>();
+    check_hardware_format::<u64>();
+    check_hardware_format::<f32>();
+    check_hardware_format::<f64>();
+}
+
+#[test]
+fn rejects_incompatible_rate_and_buffer_and_accepts_integer_devices() {
     let fixed = SupportedBufferSize::Range { min: 256, max: 512 };
     assert!(select_config([config(1, SampleFormat::F32, fixed)].into_iter()).is_none());
-    assert!(
+    let integer =
         select_config([config(1, SampleFormat::I16, SupportedBufferSize::Unknown)].into_iter())
-            .is_none()
-    );
+            .expect("integer devices convert to internal f32");
+    assert_eq!(integer.format, SampleFormat::I16);
     let wrong_rate = cpal::SupportedStreamConfigRange::new(
         1,
         SampleRate(44_100),
