@@ -60,6 +60,8 @@ fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
     }
     capture(&input[..64], 1, &mut mic, &stats);
     playback(&mut output[..64], 1, &mut speaker, &mut started, &stats);
+    capture(&input[..64], 3, &mut mic, &stats);
+    playback(&mut output[..64], 3, &mut speaker, &mut started, &stats);
     let allocations = ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(allocations, Some(0));
     assert!(stats.input_overflows.load(Ordering::Relaxed) > 0);

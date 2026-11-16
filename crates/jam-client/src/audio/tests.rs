@@ -135,14 +135,35 @@ fn full_rings_never_block_or_overwrite_queued_audio() {
 }
 
 #[test]
-fn unexpected_hardware_sizes_are_reported_and_output_is_silenced() {
+fn incomplete_frames_are_reported_and_output_is_silenced() {
     let stats = Stats::default();
     let (mut mic, _net_input) = RingBuffer::new(RING_CAPACITY);
     let (_net_output, mut speaker) = RingBuffer::new(RING_CAPACITY);
-    capture(&[0.5; 64], 1, &mut mic, &stats);
+    capture(&[0.5; 64], 3, &mut mic, &stats);
     let mut output = [1.0; 64];
-    playback(&mut output, 1, &mut speaker, &mut false, &stats);
+    playback(&mut output, 3, &mut speaker, &mut false, &stats);
     assert_eq!(output, [0.0; 64]);
     assert_eq!(stats.wrong_buffer_sizes.load(Ordering::Relaxed), 2);
     assert!(stats.has_errors());
+}
+
+#[test]
+fn alsa_periods_and_coalesced_callbacks_preserve_sample_order() {
+    let stats = Stats::default();
+    let (mut mic, mut net_input) = RingBuffer::new(RING_CAPACITY);
+    let (mut net_output, mut speaker) = RingBuffer::new(RING_CAPACITY);
+    for value in [0.25, 0.5, 0.75, 1.0] {
+        capture(&[value; 64], 2, &mut mic, &stats);
+    }
+    capture(&[0.0; 256], 2, &mut mic, &stats);
+    assert_eq!(bridge(&mut net_input, &mut net_output), 256);
+    let mut started = false;
+    let mut output = [0.0; 512];
+    playback(&mut output, 2, &mut speaker, &mut started, &stats);
+    assert!(started);
+    for (chunk, expected) in output[..256].chunks_exact(64).zip([0.25, 0.5, 0.75, 1.0]) {
+        assert_eq!(chunk, &[expected; 64]);
+    }
+    assert!(output[256..].iter().all(|sample| *sample == 0.0));
+    assert!(!stats.has_errors());
 }

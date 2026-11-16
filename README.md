@@ -184,6 +184,9 @@ cpal input -> mic_to_net -> thread local-loopback -> net_to_speaker -> cpal outp
 
 Servono dispositivi di ingresso e uscita predefiniti che supportino `f32`,
 48.000 Hz e un buffer fisso di **128 frame per canale** (circa 2,67 ms).
+La dimensione del buffer richiesta non impone la lunghezza di ogni callback:
+ALSA può consegnare periodi più corti o accorparli. Il client elabora tutti
+i frame ricevuti, mantenendo la richiesta `BufferSize::Fixed(128)`.
 Su Linux servono anche `pkg-config` e gli header ALSA (`libasound2-dev` su Debian/Ubuntu).
 Selezionare l'interfaccia desiderata nelle impostazioni audio del sistema prima dell'avvio.
 Il client sceglie la configurazione compatibile con meno canali: acquisisce il primo
@@ -216,7 +219,7 @@ non implementa ricampionamento o compensazione del clock.
 
 L'overflow scarta i nuovi campioni di ingresso; l'underflow riempie con silenzio
 i campioni mancanti. Entrambi vengono contati. Il client interrompe la prova
-se rileva campioni persi, errori `cpal` o callback di dimensione diversa da 128 frame,
+se rileva campioni persi, errori `cpal` o buffer che contengono frame incompleti,
 e termina con codice non zero. Un dispositivo o formato non disponibile causa
 un errore esplicito; un ingresso che non produce audio causa un timeout di 5 secondi.
 Il riepilogo finale riporta callback, campioni persi e contatori di errore.

@@ -47,7 +47,7 @@ pub fn select_config(
                 && config.max_sample_rate().0 >= SAMPLE_RATE
                 && match config.buffer_size() {
                     SupportedBufferSize::Range { min, max } => *min <= 128 && *max >= 128,
-                    // Verify actual callback sizes when the backend cannot report its range.
+                    // Stream construction validates the request if the range is unknown.
                     SupportedBufferSize::Unknown => true,
                 }
         })
@@ -62,7 +62,8 @@ pub fn select_config(
 /// Keep channel 1 as the mono instrument signal. Drop whole frames on overflow.
 pub fn capture(data: &[f32], channels: usize, mic_to_net: &mut Producer<f32>, stats: &Stats) {
     stats.input_callbacks.fetch_add(1, Ordering::Relaxed);
-    if data.len() != BUFFER_FRAMES * channels {
+    // ALSA may deliver part of the hardware buffer, or coalesce several periods.
+    if channels == 0 || data.len() % channels != 0 {
         stats.wrong_buffer_sizes.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -82,13 +83,13 @@ pub fn playback(
     stats: &Stats,
 ) {
     stats.output_callbacks.fetch_add(1, Ordering::Relaxed);
-    if data.len() != BUFFER_FRAMES * channels {
+    if channels == 0 || data.len() % channels != 0 {
         stats.wrong_buffer_sizes.fetch_add(1, Ordering::Relaxed);
         data.fill(0.0);
         return;
     }
     if !*started {
-        if net_to_speaker.slots() < PREFILL_SAMPLES {
+        if net_to_speaker.slots() < PREFILL_SAMPLES.max(data.len() / channels) {
             data.fill(0.0);
             return;
         }
