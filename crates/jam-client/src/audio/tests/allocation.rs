@@ -72,3 +72,35 @@ fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
     assert!(stats.input_overflows.load(Ordering::Relaxed) > 0);
     assert!(stats.output_underflows.load(Ordering::Relaxed) > 0);
 }
+
+#[test]
+fn multichannel_mixer_never_allocates_during_playback_or_peer_reuse() {
+    let (mut rx, mut mixer) = crate::mixer::channels();
+    let controls = std::sync::Arc::clone(&mixer.controls);
+    let stats = Stats::default();
+    let mut output = [0.0; BUFFER_FRAMES * 2];
+    let mut integer_output = [0_u16; BUFFER_FRAMES * 2];
+    let chunk = [0.8; BUFFER_FRAMES];
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    mixer.playback(&mut output, 2, &stats);
+    for _ in 0..40 {
+        for id in 1..=8 {
+            rx.push(id, &chunk);
+        }
+    }
+    controls[0].gain.store(0.5_f32.to_bits(), Ordering::Relaxed);
+    controls[1].mute.store(true, Ordering::Relaxed);
+    controls[2].solo.store(true, Ordering::Relaxed);
+    mixer.playback(&mut output, 2, &stats);
+    for id in 1..=8 {
+        rx.remove(id);
+        rx.push(id, &chunk);
+    }
+    mixer.playback(&mut integer_output, 2, &stats);
+    for _ in 0..40 {
+        mixer.playback(&mut output, 2, &stats);
+    }
+    mixer.playback(&mut output[..64], 3, &stats);
+    let allocations = ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(allocations, Some(0));
+}

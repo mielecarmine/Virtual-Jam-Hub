@@ -58,28 +58,38 @@ where
     )
 }
 
+pub enum Playback {
+    Loopback {
+        consumer: Consumer<f32>,
+        started: bool,
+    },
+    Mix(crate::mixer::Mixer),
+}
+
 pub fn output(
     device: &cpal::Device,
     config: &AudioConfig,
-    consumer: Consumer<f32>,
+    playback: Playback,
     stats: Arc<Stats>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    dispatch_format!(config.format, build_output, device, config, consumer, stats)
+    dispatch_format!(config.format, build_output, device, config, playback, stats)
 }
 
 fn build_output<T: SizedSample + FromSample<f32>>(
     device: &cpal::Device,
     config: &AudioConfig,
-    mut consumer: Consumer<f32>,
+    mut playback: Playback,
     stats: Arc<Stats>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let errors = Arc::clone(&stats);
     let channels = usize::from(config.stream.channels);
-    let mut started = false;
     device.build_output_stream(
         &config.stream,
-        move |data: &mut [T], _| {
-            audio::playback(data, channels, &mut consumer, &mut started, &stats);
+        move |data: &mut [T], _| match &mut playback {
+            Playback::Loopback { consumer, started } => {
+                audio::playback(data, channels, consumer, started, &stats);
+            }
+            Playback::Mix(mixer) => mixer.playback(data, channels, &stats),
         },
         move |_| {
             errors.output_errors.fetch_add(1, Ordering::Relaxed);

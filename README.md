@@ -306,7 +306,7 @@ eco locale o campioni non finiti/fuori da `[-1, 1]` vengono scartati; un buffer 
 uscita pieno scarta l'intero frame ricevuto.
 
 Il riordino e il jitter buffer per peer sono implementati in JAM-10 (vedi sotto).
-Il mixer con controlli multicanale e Opus restano previsti in JAM-11 e JAM-12.
+Il mixer multicanale è descritto in JAM-11; Opus resta previsto in JAM-12.
 Gli underflow di rete producono silenzio e vengono contati senza interrompere
 la sessione; i problemi hardware `cpal` restano fatali. Gli overflow d'ingresso
 vengono contati e scartati. Il loopback mantiene i suoi criteri rigorosi JAM-8.
@@ -335,9 +335,9 @@ Una grande discontinuità di sequenza reinizializza soltanto il peer interessato
 La lista peer e un timeout di 5 secondi eliminano gli stati non più attivi.
 
 Il worker produce al massimo un chunk per scadenza (~2,67 ms), senza recuperare
-ritardi con raffiche. Somma i peer pronti e limita l'uscita a `[-1, 1]`; i controlli
-di mix per musicista saranno introdotti in JAM-11. Il ring speaker pieno scarta
-un chunk intero. I callback `cpal` restano senza allocazioni, lock o I/O.
+ritardi con raffiche. Invia ogni peer pronto al suo ring SPSC dedicato; un ring
+pieno scarta soltanto il chunk di quel peer. Il mix avviene nel callback audio
+come descritto in JAM-11. I callback `cpal` restano senza allocazioni, lock o I/O.
 
 Per provare perdita e jitter in ricezione su uno o entrambi i client:
 
@@ -356,3 +356,33 @@ delle perdite, isolamento dei peer, scadenza e cadenza con 2% di perdita e 10 ms
 di jitter su tempo simulato. Per l'accettazione all'ascolto usare due client con
 uno strumento o parlato continuo e verificare intelligibilità e assenza di
 interruzioni con questi flag; tale verifica hardware rimane manuale.
+
+### 10. Mixer multicanale RT e soft clipping — JAM-11
+
+In modalità UDP, il callback di output legge un array fisso di `MAX_PEERS` ring
+`rtrb` (4096 campioni ciascuno), indicizzati con `peer_id - 1` e allocati prima
+dell'avvio degli stream. Il worker conserva un jitter buffer indipendente per
+peer e non somma né limita più i campioni. Il callback somma `sample * gain`
+e applica `tanh(sum)`, duplicando il risultato mono sui canali hardware.
+Con quattro flussi da `0.8`, l'uscita è circa `0.9967` e resta in `[-1, 1]`.
+Il soft clipping modifica anche i segnali sotto soglia, secondo la curva `tanh`.
+Il loopback locale conserva il percorso originale senza soft clipping.
+
+`Mixer::controls` espone un `Arc<[Controls; MAX_PEERS]>` condivisibile con una
+futura UI. Ogni slot ha `gain: AtomicU32` (`f32::to_bits`, default `1.0`),
+`mute: AtomicBool` e `solo: AtomicBool` (default `false`). I parametri vengono
+letti per ogni frame hardware; mute prevale su solo. Se almeno un peer attivo
+è in solo, gli altri sono silenziati. I gain non finiti vengono silenziati;
+la somma in `f64` evita overflow anche con gain `f32` finiti molto grandi.
+I controlli sono disponibili come API interna; questo ticket non aggiunge una UI.
+
+Anche i peer silenziati vengono consumati, così l'unmute non riproduce audio
+arretrato. Un ring vuoto contribuisce silenzio senza bloccare gli altri peer.
+Alla rimozione per lista peer o timeout, un contatore di generazione atomico
+invalida i campioni già accodati e ripristina i controlli ai default: un ID
+riutilizzato non eredita l'audio della sessione precedente.
+
+I test coprono quattro flussi simultanei, continuità della curva, gain/mute/solo
+su audio già accodato, stereo, underflow, overflow indipendente, riuso ID e zero
+allocazioni nel callback anche durante il ricambio dei peer. La conferma
+all'ascolto con più musicisti resta una verifica hardware manuale.

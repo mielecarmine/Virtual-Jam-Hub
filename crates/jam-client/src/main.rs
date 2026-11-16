@@ -3,6 +3,7 @@
 mod audio;
 mod cli;
 mod jitter;
+mod mixer;
 mod network;
 mod streams;
 
@@ -59,11 +60,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     ctrlc::set_handler(move || signal_stop.store(true, Ordering::Relaxed))?;
     let (mic_producer, mut mic_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
     let (mut speaker_producer, speaker_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
+    let (rx, mixer) = mixer::channels();
     let input_stream = streams::input(&input, &input_config, mic_producer, Arc::clone(&stats))?;
     let output_stream = streams::output(
         &output,
         &output_config,
-        speaker_consumer,
+        if network_mode {
+            streams::Playback::Mix(mixer)
+        } else {
+            streams::Playback::Loopback {
+                consumer: speaker_consumer,
+                started: false,
+            }
+        },
         Arc::clone(&stats),
     )?;
 
@@ -82,7 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
             .spawn_scoped(scope, move || -> io::Result<()> {
                 if let Some(network) = network {
-                    let result = network.run(mic_consumer, speaker_producer, worker_stop);
+                    let result = network.run(mic_consumer, rx, worker_stop);
                     worker_stop.store(true, Ordering::Relaxed);
                     return result;
                 }
@@ -111,6 +120,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     report(&stats);
     let completed = result?;
+    finish(&stats, network_mode, completed)
+}
+
+fn finish(stats: &Stats, network_mode: bool, completed: bool) -> Result<(), Box<dyn Error>> {
     let hardware_failed = if network_mode {
         stats.has_hardware_errors()
     } else {
@@ -149,7 +162,7 @@ fn describe_audio(
         output_config.format
     );
     println!(
-        "48000 Hz, 128 frames; internal f32; channel 1 -> all outputs; two 4096-sample rings."
+        "48000 Hz, 128 frames; internal f32; channel 1 -> all outputs; 4096-sample SPSC rings."
     );
     println!(
         "Use headphones. Running for {} seconds; Ctrl+C stops early.",

@@ -3,12 +3,13 @@
 use crate::{
     audio::BUFFER_FRAMES,
     jitter::{CHUNK_TIME, Chunk, PeerJitterBuffer},
+    mixer::RxChannels,
 };
 use jam_protocol::{
     AUDIO_HEADER_SIZE, AudioHeader, ControlMessage, MAX_PACKET_SIZE, NICKNAME_CAPACITY,
     SAMPLE_RATE, STREAM_PRIMARY,
 };
-use rtrb::{Consumer, Producer};
+use rtrb::Consumer;
 use std::collections::BTreeMap;
 use std::{
     io,
@@ -133,7 +134,7 @@ impl Network {
         });
     }
 
-    fn playback(&mut self, speaker: &mut Producer<f32>, now: Instant) {
+    fn playback(&mut self, speaker: &mut RxChannels, now: Instant) {
         // Deliver in simulated arrival order even when several deadlines fall in one tick.
         self.delayed
             .sort_unstable_by_key(|packet| std::cmp::Reverse(packet.due));
@@ -148,8 +149,13 @@ impl Network {
                 })
                 .insert(packet.sequence, &packet.chunk, now);
         }
-        self.peers
-            .retain(|_, peer| now.duration_since(peer.last_received) < SERVER_TIMEOUT);
+        self.peers.retain(|id, peer| {
+            let keep = now.duration_since(peer.last_received) < SERVER_TIMEOUT;
+            if !keep {
+                speaker.remove(*id);
+            }
+            keep
+        });
         if self.peers.is_empty() {
             self.next_playout = None;
             return;
@@ -166,17 +172,9 @@ impl Network {
         } else {
             *next + CHUNK_TIME
         };
-        let mut mixed = [0.0; BUFFER_FRAMES];
-        for peer in self.peers.values_mut() {
+        for (&id, peer) in &mut self.peers {
             if let Some(chunk) = peer.pop(now) {
-                for (out, sample) in mixed.iter_mut().zip(chunk) {
-                    *out += sample;
-                }
-            }
-        }
-        if speaker.slots() >= BUFFER_FRAMES {
-            for sample in mixed {
-                let _ = speaker.push(sample.clamp(-1.0, 1.0));
+                speaker.push(id, &chunk);
             }
         }
     }
@@ -206,7 +204,7 @@ impl Network {
     fn tick(
         &mut self,
         mic: &mut Consumer<f32>,
-        speaker: &mut Producer<f32>,
+        speaker: &mut RxChannels,
         now: Instant,
     ) -> io::Result<()> {
         if self.peer_id.is_none()
@@ -252,8 +250,13 @@ impl Network {
                         self.last_server = now;
                     }
                     ControlMessage::PeerListUpdate { peers } if self.peer_id.is_some() => {
-                        self.peers
-                            .retain(|id, _| peers.iter().any(|p| p.peer_id == *id));
+                        self.peers.retain(|id, _| {
+                            let keep = peers.iter().any(|p| p.peer_id == *id);
+                            if !keep {
+                                speaker.remove(*id);
+                            }
+                            keep
+                        });
                         self.delayed
                             .retain(|packet| peers.iter().any(|p| p.peer_id == packet.peer));
                         self.last_server = now;
@@ -311,7 +314,7 @@ impl Network {
     pub fn run(
         mut self,
         mut mic: Consumer<f32>,
-        mut speaker: Producer<f32>,
+        mut speaker: RxChannels,
         stop: &AtomicBool,
     ) -> io::Result<()> {
         let result = (|| {
