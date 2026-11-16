@@ -58,13 +58,24 @@ impl Room {
         let mut buffer = [0; MAX_PACKET_SIZE];
         for (index, client) in self.clients.iter().enumerate() {
             if index != sender {
-                let length = client.recv(&mut buffer).unwrap();
+                let length = receive(client, &mut buffer);
                 assert_eq!(&buffer[..length], packet);
             }
             assert_silent(client);
         }
         duration
     }
+}
+
+// Sending on loopback does not make the packet immediately readable on every OS.
+fn receive(socket: &UdpSocket, buffer: &mut [u8]) -> usize {
+    socket.set_nonblocking(false).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let length = socket.recv(buffer).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    length
 }
 
 fn assert_silent(socket: &UdpSocket) {
@@ -80,7 +91,7 @@ fn send_control(socket: &UdpSocket, message: &ControlMessage) {
 
 fn receive_control(socket: &UdpSocket) -> ControlMessage {
     let mut buffer = [0; MAX_PACKET_SIZE];
-    let length = socket.recv(&mut buffer).unwrap();
+    let length = receive(socket, &mut buffer);
     ControlMessage::from_bytes(&buffer[..length]).unwrap()
 }
 
@@ -178,7 +189,7 @@ fn departed_peer_neither_sends_nor_receives_audio() {
     room.clients[0].send(&packet).unwrap();
     room.server.poll().unwrap();
     let mut buffer = [0; MAX_PACKET_SIZE];
-    let length = room.clients[2].recv(&mut buffer).unwrap();
+    let length = receive(&room.clients[2], &mut buffer);
     assert_eq!(&buffer[..length], packet);
     room.assert_silent();
 }

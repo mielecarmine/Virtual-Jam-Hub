@@ -160,7 +160,9 @@ fn expired_peer_cannot_send_or_receive_audio() {
     let expired = UdpSocket::bind("127.0.0.1:0").unwrap();
     active.connect(server.local_addr().unwrap()).unwrap();
     expired.connect(server.local_addr().unwrap()).unwrap();
-    active.set_nonblocking(true).unwrap();
+    active
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
     expired.set_nonblocking(true).unwrap();
     let now = Instant::now();
     server
@@ -182,6 +184,7 @@ fn expired_peer_cannot_send_or_receive_audio() {
     assert!(server.last_reflection_duration().is_none());
     let mut buffer = [0; MAX_PACKET_SIZE];
     let length = active.recv(&mut buffer).unwrap();
+    active.set_nonblocking(true).unwrap();
     assert!(matches!(
         ControlMessage::from_bytes(&buffer[..length]).unwrap(),
         ControlMessage::PeerListUpdate { peers } if peers.len() == 1
