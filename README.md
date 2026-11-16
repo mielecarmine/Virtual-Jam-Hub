@@ -470,7 +470,8 @@ Ogni strip mostra nickname, fader verticale da −60 a +6 dB (0 dB = gain 1),
 Mute e Solo. Più Solo possono essere attivi insieme; Mute prevale su Solo.
 −60 dB attenua il segnale a 0,001: per silenziarlo completamente usare Mute.
 Le modifiche agiscono solo sul proprio ascolto, tramite gli atomici del mixer.
-Il monitoraggio locale resta disabilitato, quindi non è presente una strip locale.
+Il monitoraggio locale resta disabilitato; JAM-15 aggiunge una strip di sola misura
+dell’ingresso locale.
 Le impostazioni dei peer sono temporanee e tornano ai valori iniziali alla loro
 uscita o alla riconnessione.
 
@@ -478,3 +479,36 @@ Verifica manuale: connettere due o più client, variare i fader, attivare Solo e
 Mute, poi disconnettere e riconnettere un peer verificando strip e reset dei
 controlli. I test automatici coprono conversione dB/gain, aggiornamenti della
 lista, reset dei peer e applicazione dei controlli sull'audio già accodato.
+
+
+### 14. Telemetria e VU meter — JAM-15
+
+Le strip mostrano il picco dell’ingresso locale e di ogni peer prima di fader,
+mute e solo. La scala è −60…0 dBFS, verde sotto −12 dBFS, gialla fino a −3 dBFS,
+rossa sopra. Il marker trattiene il picco per un secondo; a 0 dBFS diventa rosso.
+La UI richiede aggiornamenti a 60 fps e applica un decadimento temporale.
+I callback calcolano un massimo per blocco su stack e lo accumulano in
+`AtomicU32`; la UI lo legge e azzera, senza perdere i picchi tra due repaint.
+Non vengono aggiunti lock, allocazioni o chiamate all’orologio nei callback.
+
+La barra superiore riceve metriche ogni 500 ms dal thread di rete:
+
+- **Ping RTT**: tempo di andata e ritorno al server, misurato dal Ping/Pong
+  corrispondente; `—` prima del primo campione e dopo cinque secondi senza misura.
+- **Jitter**: media esponenziale della variazione dei tempi di transito
+  (fattore 1/16), usando sequenze e frame da 2,5 ms; mostra il massimo tra peer.
+- **Packet Loss**: percentuale cumulativa in ricezione sui peer attivi, pesata
+  per pacchetti attesi. Una finestra di 64 pacchetti permette il riordino prima
+  di confermare la perdita; i duplicati non alterano il conteggio. La misura
+  inizia dal primo pacchetto ricevuto e richiede pacchetti successivi per
+  confermare i buchi; non misura la perdita in trasmissione verso il server.
+- **Jitter Buffer**: massimo tra peer dei millisecondi di audio codificato
+  effettivamente accodato, esclusi coda SPSC e buffer hardware.
+
+Il simulatore JAM-10 agisce prima delle misure. I test verificano perdita al 2%
+con jitter simulato di 10 ms, RTT, cadenza di pubblicazione, riordino, duplicati,
+wrap-around, indipendenza dei meter e assenza di allocazioni audio.
+Per la verifica manuale, connettere due client GUI, suonare segnali di intensità
+variabile e controllare movimento fluido, marker di picco, mute/fader e reset
+alla riconnessione. La fluidità effettiva a 60 fps e la sincronia con una scheda
+audio fisica richiedono questa prova sul desktop.

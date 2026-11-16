@@ -14,6 +14,7 @@ const PREFILL_SAMPLES: usize = 2 * BUFFER_FRAMES;
 
 #[derive(Default)]
 pub struct Stats {
+    pub input_peak: AtomicU32,
     pub input_callbacks: AtomicU32,
     pub output_callbacks: AtomicU32,
     pub input_overflows: AtomicU32,
@@ -104,11 +105,19 @@ pub fn capture<T: Sample>(
         stats.wrong_buffer_sizes.fetch_add(1, Ordering::Relaxed);
         return;
     }
+    let mut peak = 0.0_f32;
     for frame in data.chunks_exact(channels) {
-        if mic_to_net.push(frame[0].to_sample::<f32>()).is_err() {
+        let value = frame[0].to_sample::<f32>();
+        if value.is_finite() {
+            peak = peak.max(value.abs());
+        }
+        if mic_to_net.push(value).is_err() {
             stats.input_overflows.fetch_add(1, Ordering::Relaxed);
         }
     }
+    stats
+        .input_peak
+        .fetch_max(peak.to_bits(), Ordering::Relaxed);
 }
 
 /// Duplicate mono on all output channels; an empty ring produces silence.

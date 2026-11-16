@@ -25,6 +25,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let controller = Controller::start(preferences.clone(), path.clone())?;
     let app = AppState {
+        telemetry: crate::network::Telemetry::default(),
+        meters: std::array::from_fn(|_| Meter::default()),
         mixer: None,
         preferences,
         controller,
@@ -49,6 +51,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 struct AppState {
+    telemetry: crate::network::Telemetry,
+    meters: [Meter; jam_protocol::MAX_PEERS + 1],
     mixer: Option<MixerView>,
     preferences: Preferences,
     controller: Controller,
@@ -75,7 +79,19 @@ impl AppState {
     fn events(&mut self) {
         while let Ok(event) = self.controller.events.try_recv() {
             match event {
-                Event::Mixer(view) => self.mixer = Some(view),
+                Event::Telemetry(metrics) => self.telemetry = metrics,
+                Event::Mixer(view) => {
+                    for peer in &view.peers {
+                        if self
+                            .mixer
+                            .as_ref()
+                            .is_none_or(|old| !old.peers.contains(peer))
+                        {
+                            self.meters[usize::from(peer.peer_id)] = Meter::default();
+                        }
+                    }
+                    self.mixer = Some(view);
+                }
                 Event::Catalog(result) => {
                     self.loading = false;
                     match result {
@@ -89,6 +105,8 @@ impl AppState {
                 Event::Phase(phase) => {
                     if phase == Phase::Disconnected {
                         self.mixer = None;
+                        self.telemetry = crate::network::Telemetry::default();
+                        self.meters = std::array::from_fn(|_| Meter::default());
                     }
                     self.phase = phase;
                     self.disconnecting = false;
@@ -204,7 +222,7 @@ impl AppState {
         }
     }
 
-    fn mixer(&self, ui: &mut egui::Ui) {
+    fn mixer(&mut self, ui: &mut egui::Ui) {
         if self.phase != Phase::Connected {
             return;
         }
@@ -219,6 +237,13 @@ impl AppState {
         }
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal_top(|ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(85.0);
+                    ui.vertical_centered(|ui| {
+                        ui.strong("Ingresso locale");
+                        self.meters[0].show(ui, &view.stats.input_peak);
+                    });
+                });
                 for peer in &view.peers {
                     ui.push_id(peer.peer_id, |ui| {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -228,6 +253,7 @@ impl AppState {
                                     &peer.nickname[..usize::from(peer.nickname_len)],
                                 ));
                                 let control = &view.controls[usize::from(peer.peer_id) - 1];
+                                self.meters[usize::from(peer.peer_id)].show(ui, &control.peak);
                                 let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
                                 let mut db = gain_to_db(gain);
                                 if ui
@@ -340,6 +366,17 @@ fn device_combo(
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events();
+        egui::TopBottomPanel::top("telemetry").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let rtt = self.telemetry.rtt_ms.map_or_else(|| "—".into(), |ms| format!("{ms:.1}"));
+                ui.label(format!("Ping RTT: {rtt} ms"));
+                if self.phase == Phase::Connected {
+                    ui.label(format!("Jitter: {:.1} ms · Packet Loss: {:.1}% · Jitter Buffer: {:.1} ms",
+                        self.telemetry.jitter_ms, self.telemetry.loss_percent, self.telemetry.buffer_ms))
+                        .on_hover_text("Ricezione: jitter massimo tra peer; perdita cumulativa dopo una finestra di riordino di 64 pacchetti; buffer = massimo audio codificato attualmente in coda, esclusi buffer hardware e SPSC.");
+                } else { ui.label("Jitter: — · Packet Loss: — · Jitter Buffer: —"); }
+            });
+        });
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Virtual Jam");
@@ -380,7 +417,7 @@ impl eframe::App for AppState {
             self.command(Command::Save(self.preferences.clone()));
             self.changed_at = None;
         }
-        ctx.request_repaint_after(Duration::from_millis(50));
+        ctx.request_repaint_after(Duration::from_secs_f64(1.0 / 60.0));
     }
 }
 
@@ -404,6 +441,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn meter_attack_decay_and_peak_hold_follow_elapsed_time() {
+        let mut meter = Meter::default();
+        meter.advance(1.0, 0.0);
+        meter.advance(0.1, 0.5);
+        assert_eq!(meter.held, 1.0);
+        assert!((meter.level - 0.1).abs() < 0.001);
+        meter.advance(0.0, 1.5);
+        assert!(meter.held < 0.2);
+        assert!(meter.level < 0.001);
+        meter.advance(1.2, 1.6);
+        assert_eq!(meter.held, 1.2);
+    }
+
+    #[test]
     fn fader_conversion_covers_unity_and_endpoints() {
         assert!((db_to_gain(-60.0) - 0.001).abs() < 0.000001);
         assert_eq!(db_to_gain(0.0), 1.0);
@@ -411,5 +462,66 @@ mod tests {
         for db in [-60.0, -30.0, 0.0, 6.0] {
             assert!((gain_to_db(db_to_gain(db)) - db).abs() < 0.00001);
         }
+    }
+}
+
+#[derive(Default)]
+struct Meter {
+    level: f32,
+    held: f32,
+    hold_until: f64,
+    last_time: Option<f64>,
+}
+
+impl Meter {
+    fn advance(&mut self, peak: f32, now: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed = self.last_time.map_or(0.0, |last| (now - last).max(0.0)) as f32;
+        self.last_time = Some(now);
+        self.level = peak.max(self.level * (-elapsed * 8.0).exp());
+        if peak >= self.held {
+            self.held = peak;
+            self.hold_until = now + 1.0;
+        } else if now > self.hold_until {
+            self.held = self.level.max(self.held * (-elapsed * 2.0).exp());
+        }
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, peak: &std::sync::atomic::AtomicU32) {
+        let value = f32::from_bits(peak.swap(0, Ordering::Relaxed));
+        self.advance(value, ui.input(|input| input.time));
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(18.0, 100.0), egui::Sense::hover());
+        response.on_hover_text("Picco prima di fader e mute · dBFS · peak hold 1 s");
+        let painter = ui.painter();
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(25));
+        let height =
+            |value: f32| ((20.0 * value.max(0.000_001).log10() + 60.0) / 60.0).clamp(0.0, 1.0);
+        let level = height(self.level);
+        for (low, high, color) in [
+            (0.0, 0.8, egui::Color32::GREEN),
+            (0.8, 0.95, egui::Color32::YELLOW),
+            (0.95, 1.0, egui::Color32::RED),
+        ] {
+            if level > low {
+                let area = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.bottom() - rect.height() * level.min(high)),
+                    egui::pos2(rect.right(), rect.bottom() - rect.height() * low),
+                );
+                painter.rect_filled(area, 0.0, color);
+            }
+        }
+        let y = rect.bottom() - rect.height() * height(self.held);
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(
+                2.0_f32,
+                if self.held >= 1.0 {
+                    egui::Color32::RED
+                } else {
+                    egui::Color32::WHITE
+                },
+            ),
+        );
     }
 }

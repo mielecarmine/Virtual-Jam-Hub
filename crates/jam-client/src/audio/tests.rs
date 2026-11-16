@@ -231,3 +231,20 @@ fn alsa_periods_and_coalesced_callbacks_preserve_sample_order() {
     assert!(output[256..].iter().all(|sample| *sample == 0.0));
     assert!(!stats.has_errors());
 }
+
+#[test]
+fn input_peak_survives_between_ui_frames_even_if_ring_overflows() {
+    let stats = Stats::default();
+    let (mut input, _consumer) = RingBuffer::new(1);
+    capture(&[0.2, 0.9, -1.2, f32::NAN], 1, &mut input, &stats);
+    capture(&[0.1], 1, &mut input, &stats);
+    assert_eq!(
+        f32::from_bits(stats.input_peak.swap(0, Ordering::Relaxed)),
+        1.2
+    );
+    capture(&[0.1, 1.0], 2, &mut input, &stats);
+    assert_eq!(
+        f32::from_bits(stats.input_peak.load(Ordering::Relaxed)),
+        0.1
+    );
+}

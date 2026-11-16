@@ -575,3 +575,89 @@ fn roster_tracks_silent_peers_and_resets_departed_controls() {
     network.update_roster(&[local, peer(2, b'B')], &speaker);
     assert_eq!(network.take_roster(), Some(vec![peer(2, b'B')]));
 }
+
+#[test]
+fn telemetry_matches_ping_and_publishes_every_half_second() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "meter").unwrap();
+    network.peer_id = Some(1);
+    let start = network.started;
+    let (_, mut mic) = RingBuffer::new(128);
+    let (mut rx, _mixer) = crate::mixer::channels();
+    network
+        .tick(&mut mic, &mut rx, start + PING_INTERVAL)
+        .unwrap();
+    let (stamp, _) = network.pending_ping.unwrap();
+    let _ = network.take_telemetry();
+    send_control(
+        &server,
+        network.socket.local_addr().unwrap(),
+        &ControlMessage::Pong {
+            client_timestamp_us: stamp + 1,
+            server_timestamp_us: 0,
+        },
+    );
+    network
+        .tick(&mut mic, &mut rx, start + Duration::from_millis(1010))
+        .unwrap();
+    assert!(network.rtt.is_none());
+    send_control(
+        &server,
+        network.socket.local_addr().unwrap(),
+        &ControlMessage::Pong {
+            client_timestamp_us: stamp,
+            server_timestamp_us: 0,
+        },
+    );
+    network
+        .tick(&mut mic, &mut rx, start + Duration::from_millis(1020))
+        .unwrap();
+    assert!(network.take_telemetry().is_none());
+    network
+        .tick(&mut mic, &mut rx, start + Duration::from_millis(1500))
+        .unwrap();
+    assert_eq!(network.take_telemetry().unwrap().rtt_ms, Some(20.0));
+    assert!(network.take_telemetry().is_none());
+    network.publish_telemetry(start + Duration::from_secs(7));
+    assert!(network.take_telemetry().unwrap().rtt_ms.is_none());
+}
+
+#[test]
+fn telemetry_observes_simulated_loss_jitter_and_actual_buffer_occupancy() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "meter")
+        .unwrap()
+        .configure(Settings {
+            loss: 0.02,
+            jitter_ms: 10,
+            target_chunks: 3,
+        });
+    network.random = 12345;
+    let (mut rx, _mixer) = crate::mixer::channels();
+    let start = network.started;
+    let mut bytes = packet(2, 0.3);
+    for sequence in 0..4000 {
+        AudioHeader::new(2, STREAM_PRIMARY, sequence, 0)
+            .to_bytes(&mut bytes)
+            .unwrap();
+        let now = start + CHUNK_TIME * sequence;
+        network.incoming(&bytes, 1, now);
+        network.playback(&mut rx, now).unwrap();
+    }
+    network.publish_telemetry(start + Duration::from_secs(10));
+    let metrics = network.take_telemetry().unwrap();
+    assert!((1.0..3.5).contains(&metrics.loss_percent), "{metrics:?}");
+    assert!(metrics.jitter_ms > 0.5, "{metrics:?}");
+    assert_eq!(metrics.buffer_ms, network.peers[&2].buffered_ms());
+    assert!(metrics.buffer_ms > 0.0);
+    network
+        .playback(&mut rx, start + Duration::from_millis(10020))
+        .unwrap();
+    network
+        .playback(&mut rx, start + Duration::from_secs(16))
+        .unwrap();
+    network.publish_telemetry(start + Duration::from_secs(16));
+    let metrics = network.take_telemetry().unwrap();
+    assert_eq!(metrics.buffer_ms, 0.0);
+    assert_eq!(metrics.loss_percent, 0.0);
+}

@@ -37,12 +37,14 @@ pub enum Command {
 }
 
 pub struct MixerView {
+    pub stats: Arc<Stats>,
     pub peers: Vec<jam_protocol::PeerInfo>,
     pub controls: Arc<[mixer::Controls; jam_protocol::MAX_PEERS]>,
 }
 
 pub enum Event {
     Mixer(MixerView),
+    Telemetry(crate::network::Telemetry),
     Catalog(Result<Catalog, String>),
     Phase(Phase),
     Error(String),
@@ -150,15 +152,22 @@ impl Session {
 
 trait ActiveSession {
     fn poll(&mut self) -> io::Result<bool>;
+    fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
+        None
+    }
     fn mixer_update(&mut self) -> Option<MixerView> {
         None
     }
 }
 
 impl ActiveSession for Session {
+    fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
+        self.network.take_telemetry()
+    }
     fn mixer_update(&mut self) -> Option<MixerView> {
         self.network.take_roster().map(|peers| MixerView {
             peers,
+            stats: Arc::clone(&self.stats),
             controls: Arc::clone(&self.rx.controls),
         })
     }
@@ -271,6 +280,9 @@ fn control_loop<S: ActiveSession>(
                     send(Event::Phase(phase));
                 }
                 _ => {}
+            }
+            if let Some(metrics) = session.as_mut().and_then(ActiveSession::telemetry_update) {
+                send(Event::Telemetry(metrics));
             }
             if let Some(view) = session.as_mut().and_then(ActiveSession::mixer_update) {
                 send(Event::Mixer(view));

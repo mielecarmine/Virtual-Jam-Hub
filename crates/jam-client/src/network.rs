@@ -19,6 +19,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod telemetry;
+use telemetry::ArrivalStats;
+pub use telemetry::Telemetry;
+
 const PACKET_SIZE: usize = AUDIO_HEADER_SIZE + PAYLOAD_SIZE;
 const JOIN_INTERVAL: Duration = Duration::from_millis(500);
 const PING_INTERVAL: Duration = Duration::from_secs(1);
@@ -49,6 +53,11 @@ struct Delayed {
 }
 
 pub struct Network {
+    arrivals: BTreeMap<u8, ArrivalStats>,
+    telemetry: Option<Telemetry>,
+    last_telemetry: Instant,
+    rtt: Option<(f64, Instant)>,
+    pending_ping: Option<(u64, Instant)>,
     roster: Vec<jam_protocol::PeerInfo>,
     roster_changed: bool,
     encoder: opus::Encoder,
@@ -84,6 +93,11 @@ impl Network {
         bytes[..nickname.len()].copy_from_slice(nickname.as_bytes());
         let now = Instant::now();
         Ok(Self {
+            arrivals: BTreeMap::new(),
+            telemetry: None,
+            last_telemetry: now,
+            rtt: None,
+            pending_ping: None,
             roster: Vec::new(),
             roster_changed: false,
             encoder: codec::encoder().map_err(io::Error::other)?,
@@ -129,6 +143,8 @@ impl Network {
             }
             keep
         });
+        self.arrivals
+            .retain(|id, _| peers.iter().any(|p| p.peer_id == *id));
         self.delayed
             .retain(|packet| peers.iter().any(|p| p.peer_id == packet.peer));
     }
@@ -189,6 +205,10 @@ impl Network {
                         .map_err(io::Error::other)?,
                 );
             }
+            self.arrivals
+                .entry(packet.peer)
+                .and_modify(|stats| stats.receive(packet.sequence, packet.due))
+                .or_insert_with(|| ArrivalStats::new(packet.sequence, packet.due));
             if let Some(peer) = self.peers.get_mut(&packet.peer) {
                 peer.insert(packet.sequence, &packet.chunk, now)
                     .map_err(io::Error::other)?;
@@ -201,6 +221,7 @@ impl Network {
             }
             keep
         });
+        self.arrivals.retain(|id, _| self.peers.contains_key(id));
         if self.peers.is_empty() {
             self.next_playout = None;
             return Ok(());
@@ -300,7 +321,17 @@ impl Network {
                         self.update_roster(&peers, speaker);
                         self.last_server = now;
                     }
-                    ControlMessage::Pong { .. } if self.peer_id.is_some() => {
+                    ControlMessage::Pong {
+                        client_timestamp_us,
+                        ..
+                    } if self.peer_id.is_some() => {
+                        if let Some((stamp, sent)) = self.pending_ping {
+                            if stamp == client_timestamp_us {
+                                self.rtt =
+                                    Some((now.duration_since(sent).as_secs_f64() * 1000.0, now));
+                                self.pending_ping = None;
+                            }
+                        }
                         self.last_server = now;
                     }
                     _ => {}
@@ -312,6 +343,7 @@ impl Network {
             }
         }
         self.playback(speaker, now)?;
+        self.publish_telemetry(now);
         let Some(id) = self.peer_id else {
             if now.duration_since(self.started) >= SERVER_TIMEOUT {
                 return Err(io::Error::new(
@@ -332,13 +364,49 @@ impl Network {
             ));
         }
         if now.duration_since(self.last_ping) >= PING_INTERVAL {
+            let stamp =
+                u64::try_from(now.duration_since(self.started).as_micros()).unwrap_or(u64::MAX);
             self.control(&ControlMessage::Ping {
-                client_timestamp_us: u64::try_from(now.duration_since(self.started).as_micros())
-                    .unwrap_or(u64::MAX),
+                client_timestamp_us: stamp,
             })?;
+            self.pending_ping = Some((stamp, now));
             self.last_ping = now;
         }
         self.send_audio(id, mic)
+    }
+
+    pub fn take_telemetry(&mut self) -> Option<Telemetry> {
+        self.telemetry.take()
+    }
+
+    fn publish_telemetry(&mut self, now: Instant) {
+        if now.duration_since(self.last_telemetry) < Duration::from_millis(500) {
+            return;
+        }
+        self.last_telemetry = now;
+        let expected: f64 = self.arrivals.values().map(|s| f64::from(s.expected)).sum();
+        let lost: f64 = self.arrivals.values().map(|s| f64::from(s.lost)).sum();
+        self.telemetry = Some(Telemetry {
+            rtt_ms: self
+                .rtt
+                .filter(|(_, at)| now.duration_since(*at) < SERVER_TIMEOUT)
+                .map(|(rtt, _)| rtt),
+            jitter_ms: self
+                .arrivals
+                .values()
+                .map(|s| s.jitter_ms)
+                .fold(0.0, f64::max),
+            loss_percent: if expected > 0.0 {
+                100.0 * lost / expected
+            } else {
+                0.0
+            },
+            buffer_ms: self
+                .peers
+                .values()
+                .map(PeerJitterBuffer::buffered_ms)
+                .fold(0.0, f64::max),
+        });
     }
 
     fn send_audio(&mut self, id: u8, mic: &mut Consumer<f32>) -> io::Result<()> {
