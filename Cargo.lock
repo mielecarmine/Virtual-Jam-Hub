@@ -13,3 +13,6 @@ version = "0.1.0"
 [[package]]
 name = "jam-server"
 version = "0.1.0"
+dependencies = [
+ "jam-protocol",
+]
