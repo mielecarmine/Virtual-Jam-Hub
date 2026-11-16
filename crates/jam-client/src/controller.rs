@@ -36,7 +36,13 @@ pub enum Command {
     Shutdown(Option<Preferences>),
 }
 
+pub struct MixerView {
+    pub peers: Vec<jam_protocol::PeerInfo>,
+    pub controls: Arc<[mixer::Controls; jam_protocol::MAX_PEERS]>,
+}
+
 pub enum Event {
+    Mixer(MixerView),
     Catalog(Result<Catalog, String>),
     Phase(Phase),
     Error(String),
@@ -144,9 +150,19 @@ impl Session {
 
 trait ActiveSession {
     fn poll(&mut self) -> io::Result<bool>;
+    fn mixer_update(&mut self) -> Option<MixerView> {
+        None
+    }
 }
 
 impl ActiveSession for Session {
+    fn mixer_update(&mut self) -> Option<MixerView> {
+        self.network.take_roster().map(|peers| MixerView {
+            peers,
+            controls: Arc::clone(&self.rx.controls),
+        })
+    }
+
     fn poll(&mut self) -> io::Result<bool> {
         if self.stats.has_hardware_errors() {
             return Err(io::Error::other(
@@ -255,6 +271,9 @@ fn control_loop<S: ActiveSession>(
                     send(Event::Phase(phase));
                 }
                 _ => {}
+            }
+            if let Some(view) = session.as_mut().and_then(ActiveSession::mixer_update) {
+                send(Event::Mixer(view));
             }
         }
     }
