@@ -25,6 +25,15 @@ pub struct Stats {
 }
 
 impl Stats {
+    pub fn has_hardware_errors(&self) -> bool {
+        [
+            &self.input_errors,
+            &self.output_errors,
+            &self.wrong_buffer_sizes,
+        ]
+        .iter()
+        .any(|count| count.load(Ordering::Relaxed) != 0)
+    }
     pub fn has_errors(&self) -> bool {
         [
             &self.input_overflows,

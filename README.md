@@ -266,3 +266,56 @@ l'assenza di click/interruzioni. Un arresto anticipato non completa la prova.
 I test automatici verificano configurazione, ordine dei campioni, canali,
 wrap-around, overflow, underflow e zero allocazioni nei percorsi audio;
 non sostituiscono l'ascolto su hardware reale.
+
+### 8. Audio PCM via server UDP — JAM-9
+
+Per collegare due musicisti, avviare `jam-server` e usare lo stesso indirizzo
+**IP:porta** su entrambi i client (IPv6: `[IP]:porta`). Per esempio, su una LAN:
+
+```bash
+# Server
+cargo run --locked --release -p jam-server
+
+# PC A (sostituire l'IP con quello del server)
+cargo run --locked --release -p jam-client -- --server 192.168.1.10:7777 --nickname chitarra --seconds 300
+
+# PC B, con il proprio dispositivo audio
+cargo run --locked --release -p jam-client -- --server 192.168.1.10:7777 --nickname basso --seconds 300
+```
+
+Le opzioni `--host`, `--input` e `--output` restano disponibili per scegliere
+schede diverse. Senza `--server` continua a funzionare il loopback locale JAM-8.
+In modalità rete si ascolta solo l'audio remoto; il monitoraggio locale hardware,
+se desiderato, va attivato sulla propria interfaccia. Usare cuffie.
+
+Il thread `udp-network` possiede un socket UDP connesso non bloccante: invia
+`JoinRequest` ogni 500 ms fino all'assegnazione dell'ID e `Ping` ogni secondo dopo
+il join. Un server silenzioso dopo il join provoca un errore dopo 5 secondi.
+Ctrl+C o la scadenza della durata arrestano gli stream, terminano il worker e
+inviano `Leave` al meglio delle possibilità di UDP. La durata in modalità rete
+parte dall'avvio degli stream, anche se il secondo musicista non è ancora presente.
+L'attesa del join resta interrompibile e viene mostrato l'ID assegnato.
+
+Ogni datagramma audio contiene l'header condiviso da 12 byte seguito da **128
+campioni mono `f32` little-endian**: 524 byte totali, circa 1,57 Mbit/s per flusso
+incluso l'header JAM (esclusi UDP/IP). Sequenza e timestamp avanzano con wrap-around.
+Non c'è un indicatore del codec sul wire: entrambi i client devono usare questa
+stessa modalità PCM. Il server SFU inoltra il payload senza interpretarlo.
+Pacchetti con lunghezza errata, header non valido, stream diverso dal primario,
+eco locale o campioni non finiti/fuori da `[-1, 1]` vengono scartati; un buffer di
+uscita pieno scarta l'intero frame ricevuto.
+
+Questa tappa verifica **due musicisti**: i pacchetti remoti passano al buffer
+speaker nell'ordine di arrivo. Riordino/jitter buffer indipendenti per peer,
+mixer multicanale e Opus sono previsti nei ticket JAM-10, JAM-11 e JAM-12.
+Non usare questa modalità per valutare il mix di tre o più partecipanti.
+Gli underflow di rete producono silenzio e vengono contati senza interrompere
+la sessione; i problemi hardware `cpal` restano fatali. Gli overflow d'ingresso
+vengono contati e scartati. Il loopback mantiene i suoi criteri rigorosi JAM-8.
+
+I test automatici verificano retry, heartbeat, framing PCM, wrap-around,
+validazione dei pacchetti, isolamento dell'endpoint UDP, timeout e `Leave`,
+oltre allo scambio bidirezionale senza eco fra due worker e un vero `jam-server`
+su localhost. Per completare l'accettazione hardware, avviare i due client su
+PC o schede diverse e verificare all'ascolto che entrambi ricevano lo strumento
+dell'altro in tempo reale. Questo ascolto non è sostituito dai test automatici.
