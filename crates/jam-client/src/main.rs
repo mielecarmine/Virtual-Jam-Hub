@@ -2,6 +2,7 @@
 
 mod audio;
 mod cli;
+mod jitter;
 mod network;
 mod streams;
 
@@ -44,7 +45,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let network = options
         .server
-        .map(|server| network::Network::connect(server, &options.nickname))
+        .map(|server| {
+            network::Network::connect(server, &options.nickname)
+                .map(|network| network.configure(options.network))
+        })
         .transpose()?;
     let network_mode = network.is_some();
 

@@ -305,10 +305,8 @@ Pacchetti con lunghezza errata, header non valido, stream diverso dal primario,
 eco locale o campioni non finiti/fuori da `[-1, 1]` vengono scartati; un buffer di
 uscita pieno scarta l'intero frame ricevuto.
 
-Questa tappa verifica **due musicisti**: i pacchetti remoti passano al buffer
-speaker nell'ordine di arrivo. Riordino/jitter buffer indipendenti per peer,
-mixer multicanale e Opus sono previsti nei ticket JAM-10, JAM-11 e JAM-12.
-Non usare questa modalità per valutare il mix di tre o più partecipanti.
+Il riordino e il jitter buffer per peer sono implementati in JAM-10 (vedi sotto).
+Il mixer con controlli multicanale e Opus restano previsti in JAM-11 e JAM-12.
 Gli underflow di rete producono silenzio e vengono contati senza interrompere
 la sessione; i problemi hardware `cpal` restano fatali. Gli overflow d'ingresso
 vengono contati e scartati. Il loopback mantiene i suoi criteri rigorosi JAM-8.
@@ -319,3 +317,42 @@ oltre allo scambio bidirezionale senza eco fra due worker e un vero `jam-server`
 su localhost. Per completare l'accettazione hardware, avviare i due client su
 PC o schede diverse e verificare all'ascolto che entrambi ricevano lo strumento
 dell'altro in tempo reale. Questo ascolto non è sostituito dai test automatici.
+
+### 9. Jitter buffer per peer e simulatore — JAM-10
+
+Ogni peer remoto ha un `PeerJitterBuffer` separato nel worker UDP, con 64 slot
+preallocati alla prima ricezione audio. Il playback attende inizialmente **3 chunk
+(~8 ms)** e riordina i numeri di sequenza, incluso il wrap-around `u32`.
+`--jitter-chunks N` permette un ritardo iniziale da 1 a 16 chunk. Questo ritardo
+si aggiunge al prefill del ring audio e ai buffer del dispositivo.
+
+I frame duplicati già in coda e quelli tardivi vengono scartati. Un frame tardivo
+fa crescere il target di un chunk fino a 16 (~43 ms), inserendo un frame di
+compensazione senza fermare il playback; il target rimane al valore raggiunto
+fino alla rimozione del peer. I frame mancanti vengono sostituiti ripetendo
+l'ultimo chunk con attenuazione progressiva (fattore 0,8), fino al silenzio.
+Una grande discontinuità di sequenza reinizializza soltanto il peer interessato.
+La lista peer e un timeout di 5 secondi eliminano gli stati non più attivi.
+
+Il worker produce al massimo un chunk per scadenza (~2,67 ms), senza recuperare
+ritardi con raffiche. Somma i peer pronti e limita l'uscita a `[-1, 1]`; i controlli
+di mix per musicista saranno introdotti in JAM-11. Il ring speaker pieno scarta
+un chunk intero. I callback `cpal` restano senza allocazioni, lock o I/O.
+
+Per provare perdita e jitter in ricezione su uno o entrambi i client:
+
+```bash
+cargo run --locked --release -p jam-client -- --server 127.0.0.1:7777 --nickname chitarra --jitter-chunks 3 --simulate-loss 0.02 --simulate-jitter-ms 10
+```
+
+`--simulate-loss` accetta una probabilità fra 0 e 1; `--simulate-jitter-ms`
+accetta 0..=1000 e aggiunge a ciascun frame audio un ritardo casuale uniforme
+fra zero e il valore scelto, senza sospendere il worker. I messaggi di controllo
+non vengono alterati. Il simulatore è disattivato per default e la sua coda è
+limitata a 512 frame, scartando ulteriori ingressi quando piena.
+
+I test coprono riordino 102/101, duplicati, ritardi, wrap-around, compensazione
+delle perdite, isolamento dei peer, scadenza e cadenza con 2% di perdita e 10 ms
+di jitter su tempo simulato. Per l'accettazione all'ascolto usare due client con
+uno strumento o parlato continuo e verificare intelligibilità e assenza di
+interruzioni con questi flag; tale verifica hardware rimane manuale.
