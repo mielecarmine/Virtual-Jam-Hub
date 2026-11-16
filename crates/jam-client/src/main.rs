@@ -1,11 +1,14 @@
-//! Hardware loopback or bidirectional Opus over UDP.
+//! Desktop setup GUI, hardware loopback, or bidirectional Opus over UDP.
 
 mod audio;
 mod cli;
 mod codec;
+mod controller;
+mod gui;
 mod jitter;
 mod mixer;
 mod network;
+mod setup;
 mod streams;
 
 use std::{
@@ -24,6 +27,9 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use rtrb::RingBuffer;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args_os().len() == 1 {
+        return gui::run();
+    }
     let Some(options) = cli::Options::parse(std::env::args().skip(1))? else {
         return Ok(());
     };

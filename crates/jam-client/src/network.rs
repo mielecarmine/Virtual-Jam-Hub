@@ -209,7 +209,7 @@ impl Network {
         self.send(&packet[..length])
     }
 
-    fn tick(
+    pub(crate) fn tick(
         &mut self,
         mic: &mut Consumer<f32>,
         speaker: &mut RxChannels,
@@ -282,6 +282,12 @@ impl Network {
         }
         self.playback(speaker, now)?;
         let Some(id) = self.peer_id else {
+            if now.duration_since(self.started) >= SERVER_TIMEOUT {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Server did not accept the connection within 5 seconds",
+                ));
+            }
             // Capture continues during join; do not replay stale audio after acceptance.
             for _ in 0..mic.slots() {
                 let _ = mic.pop();
@@ -346,10 +352,18 @@ impl Network {
             }
             Ok(())
         })();
+        self.disconnect();
+        result
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
+        self.peer_id.is_some()
+    }
+
+    pub(crate) fn disconnect(&self) {
         if let Some(peer_id) = self.peer_id {
             let _ = self.control(&ControlMessage::Leave { peer_id });
         }
-        result
     }
 }
 

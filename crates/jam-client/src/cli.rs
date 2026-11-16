@@ -4,7 +4,8 @@ use std::{error::Error, io, time::Duration};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
-const HELP: &str = "Usage: jam-client [--server IP:PORT] [--nickname NAME] [--host NAME] [--input NAME] [--output NAME] [--seconds N]
+const HELP: &str = "Usage: jam-client (no arguments opens the desktop setup screen)
+       jam-client [--server IP:PORT] [--nickname NAME] [--host NAME] [--input NAME] [--output NAME] [--seconds N]
        jam-client [--host NAME] --list-devices
 Without --server: local loopback. With --server: UDP Opus audio (2.5 ms, 96 kbps), no local monitoring.
 Default: system backend/devices, 300 seconds. Host names are case-insensitive.

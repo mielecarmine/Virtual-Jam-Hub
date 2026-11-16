@@ -26,6 +26,51 @@ fn send_control(socket: &UdpSocket, destination: SocketAddr, message: &ControlMe
 }
 
 #[test]
+fn join_timeout_is_reported_and_disconnect_sends_leave_after_acceptance() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let (_, mut mic) = RingBuffer::new(4096);
+    let (mut speaker, _mixer) = crate::mixer::channels();
+    let mut timed_out = Network::connect(server.local_addr().unwrap(), "guitar").unwrap();
+    assert!(!timed_out.is_connected());
+    let now = timed_out.started + SERVER_TIMEOUT;
+    assert_eq!(
+        timed_out
+            .tick(&mut mic, &mut speaker, now)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::TimedOut
+    );
+    let _ = receive(&server); // JoinRequest from the timed-out attempt.
+    for _ in 0..3 {
+        let mut network = Network::connect(server.local_addr().unwrap(), "guitar").unwrap();
+        network
+            .tick(&mut mic, &mut speaker, Instant::now())
+            .unwrap();
+        let _ = receive(&server);
+        send_control(
+            &server,
+            network.socket.local_addr().unwrap(),
+            &ControlMessage::JoinAccepted {
+                assigned_peer_id: 1,
+                sample_rate: SAMPLE_RATE,
+            },
+        );
+        network
+            .tick(&mut mic, &mut speaker, Instant::now())
+            .unwrap();
+        assert!(network.is_connected());
+        network.disconnect();
+        assert!(matches!(
+            ControlMessage::from_bytes(&receive(&server)),
+            Ok(ControlMessage::Leave { peer_id: 1 })
+        ));
+    }
+}
+
+#[test]
 fn retries_join_sends_heartbeat_frames_and_wraps_counters() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     server

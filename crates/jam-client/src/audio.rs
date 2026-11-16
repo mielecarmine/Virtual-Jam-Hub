@@ -55,13 +55,20 @@ pub struct AudioConfig {
 pub fn select_config(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
 ) -> Option<AudioConfig> {
+    select_config_for_buffer(configs, 128)
+}
+
+pub fn select_config_for_buffer(
+    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+    frames: u32,
+) -> Option<AudioConfig> {
     configs
         .filter(|config| {
             config.channels() > 0
                 && config.min_sample_rate().0 <= SAMPLE_RATE
                 && config.max_sample_rate().0 >= SAMPLE_RATE
                 && match config.buffer_size() {
-                    SupportedBufferSize::Range { min, max } => *min <= 128 && *max >= 128,
+                    SupportedBufferSize::Range { min, max } => *min <= frames && *max >= frames,
                     // Stream construction validates the request if the range is unknown.
                     SupportedBufferSize::Unknown => true,
                 }
@@ -77,7 +84,7 @@ pub fn select_config(
             stream: StreamConfig {
                 channels: config.channels(),
                 sample_rate: SampleRate(SAMPLE_RATE),
-                buffer_size: BufferSize::Fixed(128),
+                buffer_size: BufferSize::Fixed(frames),
             },
         })
 }

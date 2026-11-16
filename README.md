@@ -188,7 +188,8 @@ La dimensione del buffer richiesta non impone la lunghezza di ogni callback:
 ALSA può consegnare periodi più corti o accorparli. Il client elabora tutti
 i frame ricevuti, mantenendo la richiesta `BufferSize::Fixed(128)`.
 Su Linux servono anche `pkg-config` e gli header ALSA (`libasound2-dev` su Debian/Ubuntu).
-Senza opzioni il client usa backend e dispositivi predefiniti del sistema.
+Nella modalità CLI, senza selezioni esplicite il client usa backend e dispositivi
+predefiniti del sistema. L'avvio senza argomenti apre ora la GUI descritta nella sezione 12.
 Il client preferisce il formato `f32`, poi la configurazione con meno canali: acquisisce il primo
 canale di ingresso come segnale mono e lo riproduce su tutti i canali di uscita.
 Quando il driver espone un altro formato, il client converte i campioni in `f32`
@@ -199,7 +200,7 @@ Backend, dispositivi e formati selezionati vengono stampati all'avvio.
 
 ```bash
 # Prova di accettazione: cinque minuti effettivi dopo l'avvio della riproduzione.
-cargo run --locked --release -p jam-client
+cargo run --locked --release -p jam-client -- --seconds 300
 
 # Prova breve o durata personalizzata; Ctrl+C interrompe anticipatamente.
 cargo run --locked --release -p jam-client -- --seconds 10
@@ -413,3 +414,47 @@ il simulatore al 2% di perdita / 10 ms di jitter, lo scambio bidirezionale e qua
 peer remoti attraverso un vero SFU, oltre alle zero allocazioni dei callback.
 La verifica percettiva su strumenti e hardware reali resta manuale: usare due
 client aggiornati, prima senza simulatore e poi con i flag della sezione 9.
+
+### 12. Setup hardware e connessione desktop — JAM-13
+
+```bash
+cargo run --locked --release -p jam-client
+```
+
+L'avvio senza argomenti apre la finestra `eframe`/`egui`. Gli argomenti CLI
+continuano ad attivare le modalità diagnostiche delle sezioni precedenti.
+Su Linux la GUI richiede una sessione X11 o Wayland, OpenGL e le librerie di sviluppo
+del sistema finestra; su Debian/Ubuntu installare `libxkbcommon-dev`,
+`libwayland-dev`, `libx11-dev`, `libxcursor-dev`, `libxi-dev`, `libxrandr-dev`
+e `libgl1-mesa-dev`, oltre ai prerequisiti audio e Opus già descritti.
+
+Scegliere backend, ingresso e uscita (anche schede USB/driver ASIO), nickname e
+server come `IP:porta` o `[IPv6]:porta`. Il menu buffer offre **64, 128, 256 frame**
+a 48 kHz, abilitando solo le dimensioni comuni ai due dispositivi. Se il driver
+non comunica il range, la costruzione dello stream verifica la richiesta.
+Un dispositivo salvato ma scollegato resta segnalato come non disponibile;
+non viene sostituito automaticamente. `Aggiorna dispositivi` ripete la ricerca.
+
+`Connetti` avvia audio e handshake UDP; lo stato diventa connesso solo dopo
+`JoinAccepted`. Un server che non accetta il join entro 5 secondi, un errore
+hardware o un timeout riportano la schermata allo stato disconnesso con un errore.
+`Disconnetti` funziona anche durante l'handshake, arresta gli stream, invia `Leave`
+se il join era completato e rilascia socket, codec e ring. È possibile cambiare
+hardware e riconnettersi senza riavviare. Usare le cuffie: non c'è monitoraggio locale.
+
+Le preferenze sono salvate automaticamente in TOML dopo le modifiche e alla
+chiusura, e ricaricate al successivo avvio. Il percorso è mostrato nella finestra:
+normalmente `$XDG_CONFIG_HOME/virtual-jam/client.toml` (o
+`~/.config/virtual-jam/client.toml`) su Linux, la directory Application Support
+su macOS e AppData su Windows. `JAM_CLIENT_CONFIG` consente di specificare un
+file alternativo. Gli errori di lettura/scrittura sono visibili nella GUI; un
+file non leggibile o malformato non viene sostituito finché non si modificano
+le preferenze o si preme `Connetti`.
+
+`AppState` appartiene alla UI. I comandi `Connect`, `Disconnect`, `SelectDevice`
+e la persistenza passano via `crossbeam_channel` al controller non real-time che
+possiede stream e rete UDP. I canali non entrano nei callback `cpal`, che
+mantengono esclusivamente ring `rtrb` e atomici. I test coprono persistenza,
+validazione, selezione dei buffer, cicli di connessione, rilascio delle sessioni,
+recupero dagli errori e timeout/`Leave` UDP. La selezione di una scheda USB fisica
+e l'ascolto con due musicisti richiedono una verifica manuale sull'hardware.
