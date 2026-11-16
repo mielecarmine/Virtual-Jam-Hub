@@ -101,28 +101,19 @@ fn retries_join_sends_heartbeat_frames_and_wraps_counters() {
 }
 
 #[test]
-fn rejects_malformed_echo_non_primary_nonfinite_and_overflow_atomically() {
-    let (mut speaker, mut output) = RingBuffer::new(128);
+fn rejects_malformed_echo_non_primary_and_nonfinite_atomically() {
     let good = packet(2, -0.25);
-    receive_audio(&good[..PACKET_SIZE - 1], 1, &mut speaker);
-    receive_audio(&packet(1, 0.5), 1, &mut speaker);
-    receive_audio(&packet(2, f32::NAN), 1, &mut speaker);
-    receive_audio(&packet(2, f32::INFINITY), 1, &mut speaker);
+    assert!(receive_audio(&good[..PACKET_SIZE - 1], 1).is_none());
+    assert!(receive_audio(&packet(1, 0.5), 1).is_none());
+    assert!(receive_audio(&packet(2, f32::NAN), 1).is_none());
+    assert!(receive_audio(&packet(2, f32::INFINITY), 1).is_none());
     let mut bad = good;
     bad[10] = 1;
-    receive_audio(&bad, 1, &mut speaker);
+    assert!(receive_audio(&bad, 1).is_none());
     bad = good;
     bad[0] = 0;
-    receive_audio(&bad, 1, &mut speaker);
-    assert!(output.pop().is_err());
-    speaker.push(0.75).unwrap();
-    receive_audio(&good, 1, &mut speaker);
-    assert_eq!(output.pop().unwrap(), 0.75);
-    assert!(output.pop().is_err());
-    receive_audio(&good, 1, &mut speaker);
-    for _ in 0..128 {
-        assert_eq!(output.pop().unwrap(), -0.25);
-    }
+    assert!(receive_audio(&bad, 1).is_none());
+    assert_eq!(receive_audio(&good, 1).unwrap().1, [-0.25; 128]);
 }
 
 #[test]
@@ -226,4 +217,132 @@ fn stopped_worker_sends_leave() {
         ControlMessage::from_bytes(&receive(&server)).unwrap(),
         ControlMessage::Leave { peer_id: 1 }
     );
+}
+
+#[test]
+fn simulated_loss_and_jitter_keep_playout_paced_and_bounded() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "test")
+        .unwrap()
+        .configure(Settings {
+            target_chunks: 3,
+            loss: 0.02,
+            jitter_ms: 10,
+        });
+    network.random = 12345;
+    let (mut speaker, mut output) = RingBuffer::new(4096);
+    let start = network.started;
+    let mut emitted = 0;
+    let mut strong = 0;
+    let mut next_packet = start;
+    let mut sequence = 0;
+    let mut started = false;
+    for tick in 0..20_000 {
+        let now = start + Duration::from_micros(tick * 250);
+        if now >= next_packet {
+            let mut bytes = packet(2, 0.5);
+            AudioHeader::new(2, STREAM_PRIMARY, sequence, 0)
+                .to_bytes(&mut bytes)
+                .unwrap();
+            network.incoming(&bytes, 1, now);
+            next_packet += CHUNK_TIME;
+            sequence += 1;
+        }
+        network.playback(&mut speaker, now);
+        if output.slots() > 0 {
+            assert_eq!(
+                output.slots(),
+                BUFFER_FRAMES,
+                "no catch-up bursts or partial chunks"
+            );
+            started = true;
+            emitted += 1;
+            for _ in 0..BUFFER_FRAMES {
+                let sample = output.pop().unwrap();
+                assert!(sample.is_finite() && (0.0..=0.5).contains(&sample));
+                if sample >= 0.32 {
+                    strong += 1;
+                }
+            }
+        }
+        if started {
+            assert!(network.next_playout.unwrap() > now);
+        }
+        assert!(network.delayed.len() <= 512);
+        assert_eq!(
+            network.peers.len(),
+            usize::from(started || !network.peers.is_empty())
+        );
+    }
+    assert!(emitted > 1800, "continuous cadence after initial prefill");
+    assert!(
+        strong > emitted * BUFFER_FRAMES * 95 / 100,
+        "signal survives impairment"
+    );
+}
+
+#[test]
+fn independent_peers_are_paced_together_and_expire_without_unbounded_silence() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+    let (mut speaker, mut output) = RingBuffer::new(128);
+    let start = network.started;
+    network.incoming(&packet(2, 0.25), 1, start);
+    network.incoming(&packet(3, -0.5), 1, start);
+    network.playback(&mut speaker, start);
+    assert_eq!(network.peers.len(), 2);
+    network.playback(&mut speaker, start + CHUNK_TIME * 3);
+    for _ in 0..128 {
+        assert_eq!(output.pop().unwrap(), -0.25);
+    }
+    network.playback(&mut speaker, start + SERVER_TIMEOUT);
+    assert!(network.peers.is_empty());
+    assert!(network.next_playout.is_none());
+    assert!(output.pop().is_err());
+}
+
+#[test]
+fn full_speaker_discards_whole_frame_and_stall_does_not_burst() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+    let (mut speaker, mut output) = RingBuffer::new(128);
+    let start = network.started;
+    network.incoming(&packet(2, 0.25), 1, start);
+    network.playback(&mut speaker, start);
+    speaker.push(0.75).unwrap();
+    network.playback(&mut speaker, start + CHUNK_TIME * 3);
+    assert_eq!(output.slots(), 1);
+    assert_eq!(output.pop().unwrap(), 0.75);
+    let stalled = start + CHUNK_TIME * 30;
+    network.playback(&mut speaker, stalled);
+    assert_eq!(output.slots(), BUFFER_FRAMES);
+    network.playback(&mut speaker, stalled);
+    assert_eq!(output.slots(), BUFFER_FRAMES);
+}
+
+#[test]
+fn simulator_drops_all_at_one_and_preserves_arrival_order_when_disabled() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+    let (mut speaker, mut output) = RingBuffer::new(4096);
+    let start = network.started;
+    network.settings.loss = 1.0;
+    network.incoming(&packet(2, 0.25), 1, start);
+    assert!(network.delayed.is_empty());
+    network.settings.loss = 0.0;
+    for sequence in 0..3 {
+        let mut bytes = packet(2, 0.25);
+        AudioHeader::new(2, STREAM_PRIMARY, sequence, 0)
+            .to_bytes(&mut bytes)
+            .unwrap();
+        network.incoming(&bytes, 1, start + CHUNK_TIME * sequence);
+        network.playback(&mut speaker, start + CHUNK_TIME * sequence);
+    }
+    assert!(output.pop().is_err());
+    for tick in 3..6 {
+        network.playback(&mut speaker, start + CHUNK_TIME * tick);
+        for _ in 0..BUFFER_FRAMES {
+            assert_eq!(output.pop().unwrap(), 0.25);
+        }
+    }
 }

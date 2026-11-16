@@ -11,9 +11,11 @@ Default: system backend/devices, 300 seconds. Host names are case-insensitive.
 Use exact device names from --list-devices. No fallback if a requested device is unavailable.
 Windows: --host asio selects the vendor ASIO driver; --host wasapi selects WASAPI.
 Linux: --host alsa; use a hardware device name for direct ALSA, default/pipewire for PipeWire.
-macOS: --host coreaudio.";
+macOS: --host coreaudio.
+UDP: --jitter-chunks 3 (1..=16), --simulate-loss 0.02 (0..=1), --simulate-jitter-ms 10 (0..=1000).";
 
 pub struct Options {
+    pub network: crate::network::Settings,
     pub host: Option<String>,
     pub server: Option<std::net::SocketAddr>,
     pub nickname: String,
@@ -27,6 +29,7 @@ impl Options {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Self>, Box<dyn Error>> {
         let mut args = args.into_iter();
         let mut options = Self {
+            network: crate::network::Settings::default(),
             host: None,
             server: None,
             nickname: "musician".into(),
@@ -42,12 +45,41 @@ impl Options {
                     return Ok(None);
                 }
                 "--list-devices" => options.list = true,
-                "--host" | "--input" | "--output" | "--seconds" | "--server" | "--nickname" => {
+                "--jitter-chunks"
+                | "--simulate-loss"
+                | "--simulate-jitter-ms"
+                | "--host"
+                | "--input"
+                | "--output"
+                | "--seconds"
+                | "--server"
+                | "--nickname" => {
                     let value = args
                         .next()
                         .filter(|value| !value.is_empty() && !value.starts_with("--"))
                         .ok_or_else(|| io::Error::other(format!("{arg} requires a value")))?;
                     match arg.as_str() {
+                        "--jitter-chunks" => {
+                            let chunks = value.parse::<usize>()?;
+                            if !(1..=16).contains(&chunks) {
+                                return Err("--jitter-chunks must be 1..=16".into());
+                            }
+                            options.network.target_chunks = chunks;
+                        }
+                        "--simulate-loss" => {
+                            let loss = value.parse::<f64>()?;
+                            if !loss.is_finite() || !(0.0..=1.0).contains(&loss) {
+                                return Err("--simulate-loss must be 0..=1".into());
+                            }
+                            options.network.loss = loss;
+                        }
+                        "--simulate-jitter-ms" => {
+                            let jitter = value.parse::<u32>()?;
+                            if jitter > 1000 {
+                                return Err("--simulate-jitter-ms must be 0..=1000".into());
+                            }
+                            options.network.jitter_ms = jitter;
+                        }
                         "--host" => options.host = Some(value),
                         "--server" => options.server = Some(value.parse()?),
                         "--nickname" => {
@@ -167,6 +199,38 @@ pub fn list_devices(host: &cpal::Host) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_jitter_and_simulator_ranges() {
+        let options = Options::parse(
+            [
+                "--jitter-chunks",
+                "2",
+                "--simulate-loss",
+                "0.02",
+                "--simulate-jitter-ms",
+                "10",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.network.target_chunks, 2);
+        assert!((options.network.loss - 0.02).abs() < f64::EPSILON);
+        assert_eq!(options.network.jitter_ms, 10);
+        for (flag, value) in [
+            ("--jitter-chunks", "0"),
+            ("--jitter-chunks", "17"),
+            ("--simulate-loss", "NaN"),
+            ("--simulate-loss", "inf"),
+            ("--simulate-loss", "-0.1"),
+            ("--simulate-loss", "1.1"),
+            ("--simulate-jitter-ms", "1001"),
+            ("--simulate-jitter-ms", "-1"),
+        ] {
+            assert!(Options::parse([flag, value].map(str::to_owned)).is_err());
+        }
+    }
 
     #[test]
     fn parses_explicit_backend_and_devices_without_changing_names() {
