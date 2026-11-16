@@ -24,6 +24,7 @@ jobs:
           - os: macos-15
             platform: macos-arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     env:
       CARGO_TERM_COLOR: always
       MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -62,6 +63,14 @@ jobs:
       - run: cargo test --workspace --locked
       - name: Release build
         run: cargo build --release --locked --workspace
+      - name: Preserve verified binaries before packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform }}
+          path: |
+            target/release/jam-client
+            target/release/jam-client.exe
+          if-no-files-found: error
       - name: Linux installer and installation smoke test
         if: runner.os == 'Linux'
         run: bash packaging/linux.sh "$VERSION"

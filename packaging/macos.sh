@@ -24,6 +24,10 @@ PLIST
 plutil -lint "$app/Contents/Info.plist"
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
-pkgbuild --component "$app" --install-location /Applications --identifier io.github.mielecarmine.virtual-jam --version 1.0.0 "dist/Virtual-Jam-${version}-macos-${arch}.pkg"
+# Disable bundle relocation: otherwise Installer can find the staging copy and
+# update it in place instead of installing the application in /Applications.
+pkgbuild --analyze --root target/package-macos target/macos-components.plist
+/usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' target/macos-components.plist
+pkgbuild --root target/package-macos --component-plist target/macos-components.plist --install-location /Applications --identifier io.github.mielecarmine.virtual-jam --version 1.0.0 "dist/Virtual-Jam-${version}-macos-${arch}.pkg"
 sudo installer -pkg "dist/Virtual-Jam-${version}-macos-${arch}.pkg" -target /
 '/Applications/Virtual Jam.app/Contents/MacOS/jam-client' --help
