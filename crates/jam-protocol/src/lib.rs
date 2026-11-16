@@ -1,4 +1,8 @@
-//! Shared protocol constants for Virtual Jam clients and servers.
+//! Shared binary protocol for Virtual Jam clients and servers.
+
+mod control;
+
+pub use control::{ControlMessage, NICKNAME_CAPACITY, PeerInfo, ProtocolError};
 
 /// Audio sample rate in samples per second.
 pub const SAMPLE_RATE: u32 = 48_000;
