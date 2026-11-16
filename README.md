@@ -148,6 +148,19 @@ I test del server usano socket UDP locali su porte effimere:
 cargo test -p jam-server
 ```
 
+La suite include lo stress test `tests/load_test.rs`: cinque thread bot completano
+il join su un server locale con porta effimera e inviano ciascuno 4.000 datagrammi
+da 120 byte, uno ogni 2,5 ms, per 10 secondi. Il carico complessivo è di 2.000
+pacchetti/s in ingresso e 8.000 in uscita. Ogni bot deve ricevere almeno il 99,9%
+dei 16.000 pacchetti degli altri quattro, senza duplicati, riordino per mittente
+o eco locale. Il test controlla anche header e payload e lascia 300 ms finali
+per drenare i datagrammi in transito. Non è ignorato nella suite ordinaria.
+Per vedere i conteggi per bot:
+
+```bash
+cargo test -p jam-server --test load_test -- --nocapture
+```
+
 Il gate di latenza si esegue separatamente in release su una macchina scarica:
 verifica 500 frame con 5 peer attivi e richiede un massimo inferiore a 200 µs.
 La misura con `Instant` parte subito dopo `recv_from` e termina dopo l'ultimo
