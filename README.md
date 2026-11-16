@@ -92,3 +92,29 @@ cargo test --workspace
 
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
+
+### 6. Avvio del server UDP
+
+```bash
+cargo run -p jam-server --release
+```
+
+Il server ascolta su `0.0.0.0:7777` tramite UDP. Il timeout di ricezione di 100 ms
+consente al watchdog di controllare le sessioni anche in assenza di traffico.
+Ogni stanza accetta al massimo 8 endpoint, assegnando il primo ID libero tra 1 e 8.
+Un `JoinRequest` ripetuto dallo stesso endpoint conserva l'ID e aggiorna il nickname.
+All'ingresso, all'uscita con `Leave` e alla scadenza di una sessione, tutti i peer
+rimanenti ricevono una `PeerListUpdate` ordinata per ID.
+
+I client devono inviare pacchetti audio validi con il proprio ID oppure `Ping`
+per mantenere attiva la sessione; i `Ping` ricevono un `Pong`. Dopo oltre 5 secondi
+di inattività il server rimuove il peer e libera il suo ID. I datagrammi malformati,
+di almeno 1400 byte o con ID non corrispondente all'endpoint non rinnovano la sessione.
+Quando la stanza è piena, i nuovi ingressi vengono ignorati: il protocollo attuale
+non definisce un messaggio di rifiuto. L'inoltro audio è previsto dal ticket JAM-5.
+
+I test del server usano socket UDP locali su porte effimere:
+
+```bash
+cargo test -p jam-server
+```
