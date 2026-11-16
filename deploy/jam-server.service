@@ -1,0 +1,32 @@
+[Unit]
+Description=Virtual Jam UDP SFU
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=jamserver
+Group=jamserver
+ExecStart=/usr/local/lib/virtual-jam/jam-server
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=1024
+TasksMax=16
+MemoryMax=128M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

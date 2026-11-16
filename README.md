@@ -119,6 +119,9 @@ usare la stessa versione del protocollo, perché il vecchio formato non è compa
 
 ### 6. Avvio del server UDP
 
+Per installare il servizio su Linux con systemd e verificare handshake/Pong
+dalla rete domestica, seguire [deploy/README.md](deploy/README.md).
+
 ```bash
 cargo run -p jam-server --release
 ```
