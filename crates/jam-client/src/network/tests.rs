@@ -30,7 +30,7 @@ fn send_control(socket: &UdpSocket, destination: SocketAddr, message: &ControlMe
 fn wait_for_datagram(socket: &UdpSocket) {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        match socket.peek(&mut [0; MAX_PACKET_SIZE]) {
+        match socket.peek(&mut [0; 65_535]) {
             Ok(_) => return,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 assert!(
@@ -685,4 +685,35 @@ fn telemetry_observes_simulated_loss_jitter_and_actual_buffer_occupancy() {
     let metrics = network.take_telemetry().unwrap();
     assert_eq!(metrics.buffer_ms, 0.0);
     assert_eq!(metrics.loss_percent, 0.0);
+}
+
+#[test]
+fn oversized_datagrams_are_dropped_and_valid_handshake_still_succeeds() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "peer").unwrap();
+    let destination = network.socket.local_addr().unwrap();
+    let (_, mut mic) = RingBuffer::new(128);
+    let (mut speaker, _mixer) = crate::mixer::channels();
+    let accepted = ControlMessage::JoinAccepted {
+        assigned_peer_id: 1,
+        sample_rate: SAMPLE_RATE,
+    };
+    let mut packet = [0; MAX_PACKET_SIZE + 100];
+    accepted.to_bytes(&mut packet).unwrap();
+    let last_server = network.last_server;
+    for length in [MAX_PACKET_SIZE, MAX_PACKET_SIZE + 100] {
+        server.send_to(&packet[..length], destination).unwrap();
+        wait_for_datagram(&network.socket);
+        network
+            .tick(&mut mic, &mut speaker, Instant::now())
+            .unwrap();
+        assert!(!network.is_connected());
+        assert_eq!(network.last_server, last_server);
+    }
+    send_control(&server, destination, &accepted);
+    wait_for_datagram(&network.socket);
+    network
+        .tick(&mut mic, &mut speaker, Instant::now())
+        .unwrap();
+    assert!(network.is_connected());
 }

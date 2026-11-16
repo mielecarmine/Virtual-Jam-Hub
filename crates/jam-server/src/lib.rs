@@ -82,6 +82,9 @@ impl Server {
                         | io::ErrorKind::TimedOut
                         | io::ErrorKind::Interrupted
                 ) => {}
+            // Winsock consumes oversized UDP datagrams but reports WSAEMSGSIZE.
+            #[cfg(windows)]
+            Err(error) if error.raw_os_error() == Some(10040) => {}
             Err(error) => return Err(error),
         }
         Ok(())

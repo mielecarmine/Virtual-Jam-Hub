@@ -295,6 +295,9 @@ impl Network {
                 {
                     break;
                 }
+                // Winsock reports WSAEMSGSIZE after discarding an oversized datagram.
+                #[cfg(windows)]
+                Err(error) if error.raw_os_error() == Some(10040) => continue,
                 Err(error) => return Err(error),
             };
             let bytes = &packet[..length];
