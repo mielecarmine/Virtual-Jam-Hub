@@ -35,6 +35,26 @@ fn selects_f32_48khz_128_frames_and_fewest_channels() {
     assert_eq!(selected.stream.buffer_size, BufferSize::Fixed(128));
 }
 
+#[test]
+fn selects_requested_hardware_buffer_and_rejects_out_of_range_sizes() {
+    for frames in [64, 128, 256] {
+        let range = config(
+            2,
+            SampleFormat::F32,
+            SupportedBufferSize::Range { min: 64, max: 256 },
+        );
+        let selected = select_config_for_buffer([range].into_iter(), frames).unwrap();
+        assert_eq!(selected.stream.buffer_size, BufferSize::Fixed(frames));
+        assert_eq!(selected.stream.sample_rate, SampleRate(SAMPLE_RATE));
+    }
+    let range = config(
+        1,
+        SampleFormat::F32,
+        SupportedBufferSize::Range { min: 128, max: 256 },
+    );
+    assert!(select_config_for_buffer([range].into_iter(), 64).is_none());
+}
+
 fn check_hardware_format<T: cpal::SizedSample + FromSample<f32> + std::fmt::Debug + PartialEq>()
 where
     f32: FromSample<T>,
