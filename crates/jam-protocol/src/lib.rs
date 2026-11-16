@@ -1,7 +1,9 @@
 //! Shared binary protocol for Virtual Jam clients and servers.
 
+mod audio;
 mod control;
 
+pub use audio::{AUDIO_HEADER_SIZE, AUDIO_PACKET_TYPE, AudioHeader};
 pub use control::{ControlMessage, NICKNAME_CAPACITY, PeerInfo, ProtocolError};
 
 /// Audio sample rate in samples per second.

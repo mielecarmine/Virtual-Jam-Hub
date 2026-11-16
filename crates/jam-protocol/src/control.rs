@@ -65,7 +65,7 @@ pub enum ControlMessage {
     } = 0x07,
 }
 
-/// Invalid input or insufficient output storage for a control datagram.
+/// Invalid input or insufficient output storage for a protocol datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
     BufferTooSmall,
@@ -84,10 +84,10 @@ impl fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BufferTooSmall => f.write_str("output buffer is too small"),
-            Self::TruncatedPacket => f.write_str("truncated control packet"),
+            Self::TruncatedPacket => f.write_str("truncated protocol packet"),
             Self::PacketTooLarge => f.write_str("packet must be smaller than MAX_PACKET_SIZE"),
             Self::InvalidMagic => f.write_str("invalid protocol magic"),
-            Self::UnknownMessageType(value) => write!(f, "unknown control message type: {value}"),
+            Self::UnknownMessageType(value) => write!(f, "unexpected message type: {value}"),
             Self::InvalidNicknameLength(value) => {
                 write!(f, "invalid nickname byte length: {value}")
             }
@@ -108,7 +108,7 @@ fn validate_nickname(length: u8) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn validate_peer(id: u8) -> Result<(), ProtocolError> {
+pub(crate) fn validate_peer(id: u8) -> Result<(), ProtocolError> {
     if id == 0 || usize::from(id) > MAX_PEERS {
         return Err(ProtocolError::InvalidPeerId(id));
     }
