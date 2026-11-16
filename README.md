@@ -173,3 +173,96 @@ tentativo di `send_to`, includendo validazione e watchdog; esclude l'attesa di r
 ```bash
 cargo test --release -p jam-server --test udp_reflector five_peer_forwarding_stays_below_200_microseconds -- --ignored --nocapture
 ```
+
+### 7. Loopback audio hardware locale — JAM-8
+
+Il client CLI collega l'ingresso audio all'uscita locale senza server o rete:
+
+```text
+cpal input -> mic_to_net -> thread local-loopback -> net_to_speaker -> cpal output
+```
+
+Servono dispositivi di ingresso e uscita che supportino
+48.000 Hz e un buffer fisso di **128 frame per canale** (circa 2,67 ms).
+La dimensione del buffer richiesta non impone la lunghezza di ogni callback:
+ALSA può consegnare periodi più corti o accorparli. Il client elabora tutti
+i frame ricevuti, mantenendo la richiesta `BufferSize::Fixed(128)`.
+Su Linux servono anche `pkg-config` e gli header ALSA (`libasound2-dev` su Debian/Ubuntu).
+Senza opzioni il client usa backend e dispositivi predefiniti del sistema.
+Il client preferisce il formato `f32`, poi la configurazione con meno canali: acquisisce il primo
+canale di ingresso come segnale mono e lo riproduce su tutti i canali di uscita.
+Quando il driver espone un altro formato, il client converte i campioni in `f32`
+all'ingresso e nel formato hardware all'uscita, senza allocare memoria nei callback.
+Supporta i dieci formati di campione di `cpal` 0.15 (`f32`, `f64`, interi signed/unsigned
+da 8, 16, 32 e 64 bit). La frequenza rimane 48 kHz, senza ricampionamento.
+Backend, dispositivi e formati selezionati vengono stampati all'avvio.
+
+```bash
+# Prova di accettazione: cinque minuti effettivi dopo l'avvio della riproduzione.
+cargo run --locked --release -p jam-client
+
+# Prova breve o durata personalizzata; Ctrl+C interrompe anticipatamente.
+cargo run --locked --release -p jam-client -- --seconds 10
+cargo run --locked -p jam-client -- --help
+```
+
+Per scegliere esplicitamente driver e dispositivi:
+
+```bash
+# Linux: elenca i nomi ALSA disponibili (i dispositivi occupati possono essere assenti).
+cargo run --locked --release -p jam-client -- --host alsa --list-devices
+
+# Linux: percorso ALSA/PipeWire condiviso.
+cargo run --locked --release -p jam-client -- --host alsa --input pipewire --output pipewire
+
+# Linux: hardware diretto; sostituire il nome con quello riportato dall'elenco.
+cargo run --locked --release -p jam-client -- --host alsa --input 'hw:CARD=USB,DEV=0' --output 'hw:CARD=USB,DEV=0'
+
+# Windows: elenco driver ASIO e scelta del driver Focusrite.
+cargo run --locked --release -p jam-client -- --host asio --list-devices
+cargo run --locked --release -p jam-client -- --host asio --input 'Focusrite USB ASIO' --output 'Focusrite USB ASIO'
+
+# macOS: CoreAudio; Windows offre anche --host wasapi.
+cargo run --locked --release -p jam-client -- --host coreaudio --list-devices
+```
+
+I nomi dei backend non distinguono maiuscole/minuscole; i nomi dei dispositivi
+devono coincidere esattamente con l'elenco. Una scelta non disponibile provoca
+un errore esplicito, senza ripiego su un altro dispositivo o backend.
+ASIO è abilitato nelle build Windows: per compilarlo occorrono gli strumenti
+C++ MSVC, LLVM/libclang e l'ASIO SDK richiesti da `cpal` (variabili `LIBCLANG_PATH`
+e `CPAL_ASIO_DIR`, se necessarie). Per eseguirlo serve il driver del produttore.
+ALSA diretto richiede che l'interfaccia non sia occupata da PipeWire o altre applicazioni;
+il client non arresta servizi audio automaticamente. PipeWire resta accessibile
+tramite i dispositivi ALSA `default`/`pipewire`; non è un backend nativo separato di `cpal`.
+La compatibilità del driver con 48 kHz e 128 frame è verificata prima dell'avvio.
+La verifica hardware su Windows/ASIO e macOS/CoreAudio va eseguita sui rispettivi sistemi.
+
+Usare cuffie per evitare feedback acustico. I due ring buffer `rtrb::RingBuffer<f32>`
+contengono ciascuno 4096 campioni mono; tutta la memoria viene allocata prima
+dell'avvio degli stream. I callback dati eseguono solo accessi a slice, operazioni
+SPSC e contatori atomici; anche i callback di errore aggiornano solo atomici.
+Stampe, attese e gestione della durata sono esterni ai callback.
+
+All'avvio l'uscita resta silenziosa fino alla disponibilità di 256 campioni
+(due blocchi, circa 5,33 ms) per assorbire lo sfasamento iniziale tra i callback.
+Il worker trasferisce i campioni disponibili e attende 250 µs tra le iterazioni.
+La capacità di 4096 campioni è un limite, non una coda mantenuta intenzionalmente piena.
+La latenza fisica totale include driver, dispositivi e scheduling: va misurata
+con un segnale e una registrazione esterna; il programma non la misura.
+Interfacce con clock indipendenti possono accumulare deriva: questo loopback
+non implementa ricampionamento o compensazione del clock.
+
+L'overflow scarta i nuovi campioni di ingresso; l'underflow riempie con silenzio
+i campioni mancanti. Entrambi vengono contati. Il client interrompe la prova
+se rileva campioni persi, errori `cpal` o buffer che contengono frame incompleti,
+e termina con codice non zero. Un dispositivo o formato non disponibile causa
+un errore esplicito; un ingresso che non produce audio causa un timeout di 5 secondi.
+Il riepilogo finale riporta callback, campioni persi e contatori di errore.
+
+Per accettare la prova hardware, lasciare terminare tutti i 300 secondi,
+verificare che i contatori di errore siano zero e confermare all'ascolto
+l'assenza di click/interruzioni. Un arresto anticipato non completa la prova.
+I test automatici verificano configurazione, ordine dei campioni, canali,
+wrap-around, overflow, underflow e zero allocazioni nei percorsi audio;
+non sostituiscono l'ascolto su hardware reale.
