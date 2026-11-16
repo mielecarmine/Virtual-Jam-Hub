@@ -4,8 +4,9 @@ use std::{error::Error, io, time::Duration};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
-const HELP: &str = "Usage: jam-client [--host NAME] [--input NAME] [--output NAME] [--seconds N]
+const HELP: &str = "Usage: jam-client [--server IP:PORT] [--nickname NAME] [--host NAME] [--input NAME] [--output NAME] [--seconds N]
        jam-client [--host NAME] --list-devices
+Without --server: local loopback. With --server: UDP PCM audio, no local monitoring.
 Default: system backend/devices, 300 seconds. Host names are case-insensitive.
 Use exact device names from --list-devices. No fallback if a requested device is unavailable.
 Windows: --host asio selects the vendor ASIO driver; --host wasapi selects WASAPI.
@@ -14,6 +15,8 @@ macOS: --host coreaudio.";
 
 pub struct Options {
     pub host: Option<String>,
+    pub server: Option<std::net::SocketAddr>,
+    pub nickname: String,
     pub input: Option<String>,
     pub output: Option<String>,
     pub duration: Duration,
@@ -25,6 +28,8 @@ impl Options {
         let mut args = args.into_iter();
         let mut options = Self {
             host: None,
+            server: None,
+            nickname: "musician".into(),
             input: None,
             output: None,
             duration: Duration::from_secs(300),
@@ -37,13 +42,20 @@ impl Options {
                     return Ok(None);
                 }
                 "--list-devices" => options.list = true,
-                "--host" | "--input" | "--output" | "--seconds" => {
+                "--host" | "--input" | "--output" | "--seconds" | "--server" | "--nickname" => {
                     let value = args
                         .next()
                         .filter(|value| !value.is_empty() && !value.starts_with("--"))
                         .ok_or_else(|| io::Error::other(format!("{arg} requires a value")))?;
                     match arg.as_str() {
                         "--host" => options.host = Some(value),
+                        "--server" => options.server = Some(value.parse()?),
+                        "--nickname" => {
+                            if value.len() > 32 {
+                                return Err("Nickname must contain 1..=32 UTF-8 bytes".into());
+                            }
+                            options.nickname = value;
+                        }
                         "--input" => options.input = Some(value),
                         "--output" => options.output = Some(value),
                         _ => {
@@ -179,6 +191,26 @@ mod tests {
         assert_eq!(options.output.as_deref(), Some("Focusrite USB ASIO"));
         assert_eq!(options.duration, Duration::from_secs(10));
         assert!(options.list);
+    }
+
+    #[test]
+    fn parses_udp_options_and_rejects_invalid_endpoints_and_nicknames() {
+        let options =
+            Options::parse(["--server", "[::1]:7777", "--nickname", "chitarra"].map(str::to_owned))
+                .unwrap()
+                .unwrap();
+        assert_eq!(options.server, Some("[::1]:7777".parse().unwrap()));
+        assert_eq!(options.nickname, "chitarra");
+        for args in [
+            vec!["--server".to_owned()],
+            vec!["--server".into(), "localhost".into()],
+            vec!["--nickname".into(), "x".repeat(33)],
+            vec!["--nickname".into(), String::new()],
+        ] {
+            assert!(Options::parse(args).is_err());
+        }
+        let defaults = Options::parse(std::iter::empty()).unwrap().unwrap();
+        assert!(defaults.server.is_none());
     }
 
     #[test]

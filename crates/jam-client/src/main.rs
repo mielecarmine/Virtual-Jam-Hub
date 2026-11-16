@@ -1,7 +1,8 @@
-//! Local hardware loopback: capture -> `mic_to_net` -> worker -> `net_to_speaker` -> playback.
+//! Hardware loopback or bidirectional raw PCM over UDP.
 
 mod audio;
 mod cli;
+mod network;
 mod streams;
 
 use std::{
@@ -32,26 +33,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("Input does not support 48000 Hz / 128 frames"))?;
     let output_config = audio::select_config(output.supported_output_configs()?)
         .ok_or_else(|| io::Error::other("Output does not support 48000 Hz / 128 frames"))?;
-    println!("Backend: {}", host.id().name());
-    println!(
-        "Input: {} ({} channels, {})",
-        input.name()?,
-        input_config.stream.channels,
-        input_config.format
-    );
-    println!(
-        "Output: {} ({} channels, {})",
-        output.name()?,
-        output_config.stream.channels,
-        output_config.format
-    );
-    println!(
-        "48000 Hz, 128 frames; internal f32; channel 1 -> all outputs; two 4096-sample rings."
-    );
-    println!(
-        "Use headphones. Running for {} seconds; Ctrl+C stops early.",
-        options.duration.as_secs()
-    );
+    describe_audio(
+        &host,
+        &input,
+        &output,
+        &input_config,
+        &output_config,
+        options.duration,
+    )?;
+
+    let network = options
+        .server
+        .map(|server| network::Network::connect(server, &options.nickname))
+        .transpose()?;
+    let network_mode = network.is_some();
 
     // Allocate shared state and ring storage before starting either audio stream.
     let stats = Arc::new(Stats::default());
@@ -73,12 +68,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = thread::scope(|scope| -> Result<bool, Box<dyn Error>> {
         let worker_stop = &worker_stop;
         let worker = thread::Builder::new()
-            .name("local-loopback".into())
-            .spawn_scoped(scope, move || {
+            .name(
+                if network_mode {
+                    "udp-network"
+                } else {
+                    "local-loopback"
+                }
+                .into(),
+            )
+            .spawn_scoped(scope, move || -> io::Result<()> {
+                if let Some(network) = network {
+                    let result = network.run(mic_consumer, speaker_producer, worker_stop);
+                    worker_stop.store(true, Ordering::Relaxed);
+                    return result;
+                }
                 while !worker_stop.load(Ordering::Relaxed) {
                     audio::bridge(&mut mic_consumer, &mut speaker_producer);
                     thread::sleep(Duration::from_micros(250));
                 }
+                Ok(())
             })?;
         let result = run_streams(
             &input_stream,
@@ -86,6 +94,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.duration,
             &stats,
             &stop,
+            network_mode.then_some(worker_stop),
         );
         // Stop callbacks before stopping their producer to avoid shutdown-only underruns.
         drop(output_stream);
@@ -93,12 +102,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         worker_stop.store(true, Ordering::Relaxed);
         worker
             .join()
-            .map_err(|_| io::Error::other("Loopback worker panicked"))?;
+            .map_err(|_| io::Error::other("Audio worker panicked"))??;
         result
     });
     report(&stats);
     let completed = result?;
-    if stats.has_errors() || !stats.playback_started.load(Ordering::Relaxed) {
+    let hardware_failed = if network_mode {
+        stats.has_hardware_errors()
+    } else {
+        stats.has_errors() || !stats.playback_started.load(Ordering::Relaxed)
+    };
+    if hardware_failed {
         return Err(io::Error::other("Hardware check failed; see counters above").into());
     }
     if completed {
@@ -109,18 +123,60 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn describe_audio(
+    host: &cpal::Host,
+    input: &cpal::Device,
+    output: &cpal::Device,
+    input_config: &audio::AudioConfig,
+    output_config: &audio::AudioConfig,
+    duration: Duration,
+) -> Result<(), Box<dyn Error>> {
+    println!("Backend: {}", host.id().name());
+    println!(
+        "Input: {} ({} channels, {})",
+        input.name()?,
+        input_config.stream.channels,
+        input_config.format
+    );
+    println!(
+        "Output: {} ({} channels, {})",
+        output.name()?,
+        output_config.stream.channels,
+        output_config.format
+    );
+    println!(
+        "48000 Hz, 128 frames; internal f32; channel 1 -> all outputs; two 4096-sample rings."
+    );
+    println!(
+        "Use headphones. Running for {} seconds; Ctrl+C stops early.",
+        duration.as_secs()
+    );
+
+    Ok(())
+}
+
 fn run_streams(
     input: &cpal::Stream,
     output: &cpal::Stream,
     duration: Duration,
     stats: &Stats,
     stop: &AtomicBool,
+    network_stop: Option<&AtomicBool>,
 ) -> Result<bool, Box<dyn Error>> {
     output.play()?;
     input.play()?;
+    let should_stop = || {
+        stop.load(Ordering::Relaxed)
+            || network_stop.is_some_and(|stop| stop.load(Ordering::Relaxed))
+            || if network_stop.is_some() {
+                stats.has_hardware_errors()
+            } else {
+                stats.has_errors()
+            }
+    };
     let startup = Instant::now();
-    while !stats.playback_started.load(Ordering::Relaxed) {
-        if stop.load(Ordering::Relaxed) || stats.has_errors() {
+    while network_stop.is_none() && !stats.playback_started.load(Ordering::Relaxed) {
+        if should_stop() {
             return Ok(false);
         }
         if startup.elapsed() >= Duration::from_secs(5) {
@@ -128,10 +184,10 @@ fn run_streams(
         }
         thread::sleep(Duration::from_millis(1));
     }
-    // Count the acceptance interval only after the first real output frame.
+    // Loopback duration starts at playback; network mode may wait for peers silently.
     let start = Instant::now();
     while start.elapsed() < duration {
-        if stop.load(Ordering::Relaxed) || stats.has_errors() {
+        if should_stop() {
             return Ok(false);
         }
         thread::sleep(Duration::from_millis(10));
