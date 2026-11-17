@@ -560,3 +560,42 @@ recupero dopo output ritardato, wrap delle posizioni e zero allocazioni.
 Verifica manuale con scheda audio e cuffie: collegare lo strumento, connettersi,
 regolare la strip «Ingresso locale» e verificare con un secondo musicista che il
 segnale ricevuto resti invariato mentre si modifica il proprio ascolto.
+
+### Benchmark di rete headless (JAM-19)
+
+Il benchmark usa il motore `Network` del client, senza aprire dispositivi `cpal`:
+handshake UDP, Ping periodici, encoder Opus LowDelay mono a 48 kHz, frame da 120
+campioni ogni 2,5 ms e payload CBR da 30 byte. Ogni peer riceve e decodifica
+con jitter buffer indipendenti; il mixer consuma l'audio in memoria.
+
+Avviare un `jam-server` locale o usare l'indirizzo di un server remoto:
+
+```bash
+cargo run --release -p jam-server
+cargo run --release -p jam-client --example net_bench -- 127.0.0.1:7777 --peers 3 --seconds 10 --output report.txt
+```
+
+Le opzioni predefinite sono `--peers 2` e `--seconds 10`. Sono ammessi da 2 a 8
+peer e almeno 2 secondi, per raccogliere anche le risposte ai Ping. Il server
+deve avere abbastanza posti liberi. `--output` è opzionale e richiede un percorso
+con estensione `.txt`; `--help` mostra la sintassi.
+
+La durata misurata inizia dopo l'accettazione di tutti i peer. I campioni di
+telemetria pubblicati ogni 500 ms vengono conservati per peer e aggregati in un
+report `min / avg / p95 / max` per Ping RTT, jitter, packet loss e jitter buffer.
+Il p95 usa il rango più vicino (`ceil(0,95 * n)`); RTT non ancora disponibili sono
+esclusi e l'assenza di campioni è indicata con `N/A`. Jitter e buffer di ogni
+snapshot sono i massimi tra i peer remoti, come nella GUI; il buffer non include
+le code SPSC o hardware. Il packet loss usa la finestra di riordino del motore
+esistente, quindi non è una misura delle ultime code ancora in volo.
+
+Il report include numero di snapshot, frame sintetici e presenza di audio
+decodificato per ogni peer. I frame saltati per ritardi del processo sono
+riportati separatamente: non vengono recuperati con raffiche di pacchetti.
+Il benchmark misura anche gli effetti dello scheduling della macchina che lo
+esegue; usare una macchina scarica e la build release per confronti riproducibili.
+Alla chiusura normale e in caso di errore i peer accettati inviano `Leave` (UDP
+best effort). Il report non misura la latenza audio end-to-end di dispositivi fisici.
+
+Il test localhost a tre peer e i test di aggregazione vengono eseguiti anche da
+`cargo test --workspace`, oppure con `cargo test -p jam-client --example net_bench`.
