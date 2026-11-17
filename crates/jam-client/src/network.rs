@@ -191,6 +191,11 @@ impl Network {
     }
 
     fn playback(&mut self, speaker: &mut RxChannels, now: Instant) -> io::Result<()> {
+        if let Some(deadline) = self.next_playout {
+            for peer in self.peers.values_mut() {
+                peer.skip_missed(deadline, now).map_err(io::Error::other)?;
+            }
+        }
         // Deliver in simulated arrival order even when several deadlines fall in one tick.
         self.delayed
             .sort_unstable_by_key(|packet| std::cmp::Reverse(packet.due));
@@ -232,12 +237,12 @@ impl Network {
         if now < *next {
             return Ok(());
         }
-        // Never catch up with a burst after a worker stall: discard stale timing debt.
-        *next = if now.duration_since(*next) >= CHUNK_TIME {
-            now + CHUNK_TIME
-        } else {
-            *next + CHUNK_TIME
-        };
+        // Preserve the fractional clock phase while skipping expired deadlines.
+        let phase = now.duration_since(*next).as_nanos() % CHUNK_TIME.as_nanos();
+        let remaining = CHUNK_TIME
+            .checked_sub(Duration::from_nanos(u64::try_from(phase).unwrap_or(0)))
+            .unwrap_or(CHUNK_TIME);
+        *next = now + remaining;
         for (&id, peer) in &mut self.peers {
             if let Some(chunk) = peer.pop(now).map_err(io::Error::other)? {
                 speaker.push(id, &chunk);

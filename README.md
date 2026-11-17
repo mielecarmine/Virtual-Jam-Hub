@@ -336,8 +336,11 @@ si aggiunge al prefill del ring audio e ai buffer del dispositivo.
 
 I frame duplicati già in coda e quelli tardivi vengono scartati. Un frame tardivo
 fa crescere il target di un chunk fino a 16 (40 ms), inserendo un frame di
-compensazione senza fermare il playback; il target rimane al valore raggiunto
-fino alla rimozione del peer. I frame mancanti vengono sintetizzati dal PLC del decoder Opus del peer.
+compensazione senza fermare il playback. Dopo ogni secondo senza pacchetti tardivi,
+il target scende di un chunk verso il valore configurato. La coda è limitata
+a target + 2 chunk (massimo 45 ms), contando anche i buchi di sequenza;
+i frame vecchi vengono scartati e il decoder del solo peer viene riallineato.
+I frame mancanti vengono sintetizzati dal PLC del decoder Opus del peer.
 Con il crate `opus`, `decode_float(&[], &mut output, false)` rappresenta un
 pacchetto perso: il flag FEC resta disattivato, perché CELT non usa il FEC SILK.
 Anche un payload corrotto rilevato in decodifica viene trattato come perdita.
@@ -348,7 +351,9 @@ interessato; gli altri decoder conservano la propria storia.
 La lista peer e un timeout di 5 secondi eliminano gli stati non più attivi.
 
 Il worker produce al massimo un chunk per scadenza (2,5 ms), senza recuperare
-ritardi con raffiche. Invia ogni peer pronto al suo ring SPSC dedicato; un ring
+ritardi con raffiche. I tick persi avanzano anche il cursore di ciascun peer,
+rispettando il suo prefill iniziale e mantenendo la fase del clock di playout.
+Invia ogni peer pronto al suo ring SPSC dedicato; un ring
 pieno scarta soltanto il chunk di quel peer. Il mix avviene nel callback audio
 come descritto in JAM-11. I callback `cpal` restano senza allocazioni, lock o I/O.
 
@@ -373,9 +378,12 @@ interruzioni con questi flag; tale verifica hardware rimane manuale.
 ### 10. Mixer multicanale RT e soft clipping — JAM-11
 
 In modalità UDP, il callback di output legge un array fisso di `MAX_PEERS` ring
-`rtrb` (4096 campioni ciascuno), indicizzati con `peer_id - 1` e allocati prima
-dell'avvio degli stream. Il worker conserva un jitter buffer indipendente per
-peer e limita i campioni decodificati senza sommare i flussi. Il callback somma `sample * gain`
+`rtrb` (480 campioni ciascuno, 10 ms a 48 kHz), indicizzati con `peer_id - 1` e allocati prima
+dell'avvio degli stream. Il callback scarta i campioni più vecchi quando la
+coda supera 240 campioni, conservando i 5 ms più recenti; il producer scarta
+i chunk interi che supererebbero il cap di 480 campioni. Il limite riguarda
+il buffering software in ricezione, esclusi dispositivo e rete.
+Il worker conserva un jitter buffer indipendente per peer e limita i campioni decodificati senza sommare i flussi. Il callback somma `sample * gain`
 e applica `tanh(sum)`, duplicando il risultato mono sui canali hardware.
 Con quattro flussi da `0.8`, l'uscita è circa `0.9967` e resta in `[-1, 1]`.
 Il soft clipping modifica anche i segnali sotto soglia, secondo la curva `tanh`.

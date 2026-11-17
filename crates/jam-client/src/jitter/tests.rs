@@ -153,3 +153,81 @@ fn corrupt_packet_is_concealed_without_stopping_playout() {
             .all(|sample| sample.is_finite())
     );
 }
+
+#[test]
+fn stable_stream_returns_to_nominal_after_late_packets() {
+    let start = Instant::now();
+    let mut buffer = PeerJitterBuffer::new(0, start, 3).unwrap();
+    let frame = encode(&mut encoder().unwrap(), 0.5);
+    let ready = buffer.ready_at;
+    buffer.insert(0, &frame, start).unwrap();
+    buffer.pop(ready).unwrap();
+    // Repeated late frames consume holds and raise headroom to the maximum.
+    for sequence in 1..=13 {
+        buffer.insert(sequence, &frame, ready).unwrap();
+        buffer.insert(0, &frame, ready).unwrap();
+        buffer.pop(ready).unwrap();
+    }
+    assert_eq!(buffer.target, MAX_TARGET);
+    let mut sequence = 14;
+    let mut maximum = 0.0_f64;
+    for tick in 1..=6000 {
+        let now = ready + CHUNK_TIME * tick;
+        buffer.insert(sequence, &frame, now).unwrap();
+        sequence = sequence.wrapping_add(1);
+        buffer.pop(now).unwrap();
+        maximum = maximum.max(buffer.buffered_ms());
+    }
+    assert_eq!(buffer.target, buffer.nominal_target);
+    assert!(buffer.buffered_ms() <= 10.0);
+    assert!(maximum <= 45.0);
+}
+
+#[test]
+fn backlog_is_bounded_by_sequence_span_including_wrap_and_holes() {
+    let start = Instant::now();
+    let initial = u32::MAX - 10;
+    let mut buffer = PeerJitterBuffer::new(initial, start, 3).unwrap();
+    let frame = encode(&mut encoder().unwrap(), 0.5);
+    for offset in 0..60 {
+        buffer
+            .insert(initial.wrapping_add(offset), &frame, start)
+            .unwrap();
+        assert!(buffer.buffered_ms() <= 12.5);
+    }
+    assert_eq!(buffer.next, initial.wrapping_add(55));
+    assert!(
+        buffer
+            .slots
+            .iter()
+            .flatten()
+            .all(|(seq, _)| seq.wrapping_sub(buffer.next) < 5)
+    );
+}
+
+#[test]
+fn missed_deadlines_respect_startup_and_skip_large_stalls_in_constant_work() {
+    let start = Instant::now();
+    let mut buffer = PeerJitterBuffer::new(u32::MAX - 2, start, 3).unwrap();
+    buffer.skip_missed(start, start + CHUNK_TIME * 2).unwrap();
+    assert_eq!(buffer.next, u32::MAX - 2);
+    buffer.skip_missed(start, start + CHUNK_TIME * 10).unwrap();
+    assert_eq!(buffer.next, 4);
+    assert!(buffer.started);
+    let frame = encode(&mut encoder().unwrap(), 0.5);
+    buffer.insert(3, &frame, start + CHUNK_TIME * 10).unwrap();
+    assert_eq!(
+        buffer.next, 4,
+        "old packets must not rewind a skipped startup"
+    );
+}
+
+#[test]
+fn peer_starting_between_global_ticks_does_not_skip_its_first_frame() {
+    let start = Instant::now();
+    let mut buffer = PeerJitterBuffer::new(100, start + Duration::from_micros(700), 3).unwrap();
+    buffer.skip_missed(start, start + CHUNK_TIME * 4).unwrap();
+    assert_eq!(buffer.next, 100);
+    buffer.skip_missed(start, start + CHUNK_TIME * 5).unwrap();
+    assert_eq!(buffer.next, 101);
+}
