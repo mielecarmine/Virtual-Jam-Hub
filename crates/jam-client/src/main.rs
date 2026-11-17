@@ -7,6 +7,7 @@ mod controller;
 mod gui;
 mod jitter;
 mod mixer;
+mod monitor;
 mod network;
 mod setup;
 mod streams;
@@ -33,6 +34,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let Some(options) = cli::Options::parse(std::env::args().skip(1))? else {
         return Ok(());
     };
+    run_cli(&options)
+}
+
+fn run_cli(options: &cli::Options) -> Result<(), Box<dyn Error>> {
     let host = cli::host(options.host.as_deref())?;
     if options.list {
         return cli::list_devices(&host);
@@ -67,13 +72,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     ctrlc::set_handler(move || signal_stop.store(true, Ordering::Relaxed))?;
     let (mic_producer, mut mic_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
     let (mut speaker_producer, speaker_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
-    let (rx, mixer) = mixer::channels();
-    let input_stream = streams::input(&input, &input_config, mic_producer, Arc::clone(&stats))?;
+    let (rx, mut mixer) = mixer::channels();
+    let monitor = network_mode.then(|| mixer.enable_local_monitor());
+    let input_stream = streams::input(
+        &input,
+        &input_config,
+        mic_producer,
+        monitor,
+        Arc::clone(&stats),
+    )?;
     let output_stream = streams::output(
         &output,
         &output_config,
         if network_mode {
-            streams::Playback::Mix(mixer)
+            streams::Playback::Mix(Box::new(mixer))
         } else {
             streams::Playback::Loopback {
                 consumer: speaker_consumer,

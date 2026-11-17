@@ -95,6 +95,7 @@ pub fn capture<T: Sample>(
     data: &[T],
     channels: usize,
     mic_to_net: &mut Producer<f32>,
+    mut monitor: Option<&mut crate::monitor::Capture>,
     stats: &Stats,
 ) where
     f32: FromSample<T>,
@@ -111,9 +112,15 @@ pub fn capture<T: Sample>(
         if value.is_finite() {
             peak = peak.max(value.abs());
         }
+        if let Some(monitor) = &mut monitor {
+            monitor.push(value);
+        }
         if mic_to_net.push(value).is_err() {
             stats.input_overflows.fetch_add(1, Ordering::Relaxed);
         }
+    }
+    if let Some(monitor) = monitor {
+        monitor.publish();
     }
     stats
         .input_peak

@@ -45,11 +45,14 @@ pub struct QueuedSample {
 pub struct RxChannels {
     pub rings: [Producer<QueuedSample>; MAX_PEERS],
     pub controls: Arc<[Controls; MAX_PEERS]>,
+    pub local_control: Arc<Controls>,
 }
 
 pub struct Mixer {
     pub(crate) rings: [Consumer<QueuedSample>; MAX_PEERS],
     pub controls: Arc<[Controls; MAX_PEERS]>,
+    local_control: Arc<Controls>,
+    local: Option<crate::monitor::Playback>,
 }
 
 pub fn channels() -> (RxChannels, Mixer) {
@@ -58,15 +61,25 @@ pub fn channels() -> (RxChannels, Mixer) {
 
 pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
     let controls = Arc::new(std::array::from_fn(|_| Controls::default()));
+    let local_control = Arc::new(Controls::default());
     let pairs = std::array::from_fn::<_, MAX_PEERS, _>(|_| RingBuffer::new(capacity));
     let (producers, consumers): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
     let rings = producers.try_into().unwrap_or_else(|_| unreachable!());
     let rx = RxChannels {
         rings,
         controls: Arc::clone(&controls),
+        local_control: Arc::clone(&local_control),
     };
     let rings = consumers.try_into().unwrap_or_else(|_| unreachable!());
-    (rx, Mixer { rings, controls })
+    (
+        rx,
+        Mixer {
+            rings,
+            controls,
+            local_control,
+            local: None,
+        },
+    )
 }
 
 impl RxChannels {
@@ -105,6 +118,13 @@ impl RxChannels {
 }
 
 impl Mixer {
+    /// Allocate the direct monitoring path before starting the hardware callbacks.
+    pub fn enable_local_monitor(&mut self) -> crate::monitor::Capture {
+        let (capture, playback) = crate::monitor::channel(crate::audio::RING_CAPACITY);
+        self.local = Some(playback);
+        capture
+    }
+
     pub fn playback<T: Sample + FromSample<f32>>(
         &mut self,
         data: &mut [T],
@@ -116,6 +136,9 @@ impl Mixer {
             stats.wrong_buffer_sizes.fetch_add(1, Ordering::Relaxed);
             data.fill(T::EQUILIBRIUM);
             return;
+        }
+        if let Some(local) = &mut self.local {
+            local.align(data.len() / channels);
         }
         // Only the consumer may discard old samples. Snapshot the count so work is bounded
         // even while the UDP producer runs, and retain the most recent 5 ms.
@@ -129,10 +152,28 @@ impl Mixer {
         }
         let mut peaks = [0.0_f32; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
-            let solo = self.controls.iter().any(|c| {
-                c.epoch.load(Ordering::Relaxed) % 2 != 0 && c.solo.load(Ordering::Relaxed)
-            });
+            let solo = (self.local.is_some() && self.local_control.solo.load(Ordering::Relaxed))
+                || self.controls.iter().any(|c| {
+                    c.epoch.load(Ordering::Relaxed) % 2 != 0 && c.solo.load(Ordering::Relaxed)
+                });
             let mut sum = 0.0;
+            if let Some(local) = &mut self.local {
+                // Always consume, including while muted or excluded by a remote solo.
+                let sample = local.pop();
+                if sample.is_some() {
+                    stats.playback_started.store(true, Ordering::Relaxed);
+                }
+                let value = sample.unwrap_or(0.0);
+                let control = &self.local_control;
+                let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
+                if value.is_finite()
+                    && gain.is_finite()
+                    && !control.mute.load(Ordering::Relaxed)
+                    && (!solo || control.solo.load(Ordering::Relaxed))
+                {
+                    sum += f64::from(value) * f64::from(gain);
+                }
+            }
             for ((ring, control), peak) in self
                 .rings
                 .iter_mut()

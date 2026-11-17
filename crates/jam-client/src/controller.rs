@@ -38,6 +38,7 @@ pub enum Command {
 
 pub struct MixerView {
     pub stats: Arc<Stats>,
+    pub local_control: Arc<mixer::Controls>,
     pub peers: Vec<jam_protocol::PeerInfo>,
     pub controls: Arc<[mixer::Controls; jam_protocol::MAX_PEERS]>,
 }
@@ -121,12 +122,19 @@ impl Session {
                     })?;
             let stats = Arc::new(Stats::default());
             let (producer, mic) = RingBuffer::new(audio::RING_CAPACITY);
-            let (rx, mixer) = mixer::channels();
-            let input = streams::input(&input, &input_config, producer, Arc::clone(&stats))?;
+            let (rx, mut mixer) = mixer::channels();
+            let monitor = mixer.enable_local_monitor();
+            let input = streams::input(
+                &input,
+                &input_config,
+                producer,
+                Some(monitor),
+                Arc::clone(&stats),
+            )?;
             let output = streams::output(
                 &output,
                 &output_config,
-                streams::Playback::Mix(mixer),
+                streams::Playback::Mix(Box::new(mixer)),
                 Arc::clone(&stats),
             )?;
             let session = Self {
@@ -169,6 +177,7 @@ impl ActiveSession for Session {
             peers,
             stats: Arc::clone(&self.stats),
             controls: Arc::clone(&self.rx.controls),
+            local_control: Arc::clone(&self.rx.local_control),
         })
     }
 

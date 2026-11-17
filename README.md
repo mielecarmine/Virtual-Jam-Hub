@@ -286,8 +286,9 @@ cargo run --locked --release -p jam-client -- --server 192.168.1.10:7777 --nickn
 
 Le opzioni `--host`, `--input` e `--output` restano disponibili per scegliere
 schede diverse. Senza `--server` continua a funzionare il loopback locale JAM-8.
-In modalità rete si ascolta solo l'audio remoto; il monitoraggio locale hardware,
-se desiderato, va attivato sulla propria interfaccia. Usare cuffie.
+In modalità rete si ascoltano i peer e il proprio ingresso tramite monitoraggio
+software diretto (JAM-18), anche nella CLI. Usare cuffie e disattivare il monitoraggio
+hardware dell'interfaccia se si vuole evitare un doppio ascolto.
 
 Il thread `udp-network` possiede un socket UDP connesso non bloccante: invia
 `JoinRequest` ogni 500 ms fino all'assegnazione dell'ID e `Ping` ogni secondo dopo
@@ -448,7 +449,8 @@ non viene sostituito automaticamente. `Aggiorna dispositivi` ripete la ricerca.
 hardware o un timeout riportano la schermata allo stato disconnesso con un errore.
 `Disconnetti` funziona anche durante l'handshake, arresta gli stream, invia `Leave`
 se il join era completato e rilascia socket, codec e ring. È possibile cambiare
-hardware e riconnettersi senza riavviare. Usare le cuffie: non c'è monitoraggio locale.
+hardware e riconnettersi senza riavviare. Usare le cuffie: il monitoraggio locale
+software è attivo durante la sessione.
 
 Le preferenze sono salvate automaticamente in TOML dopo le modifiche e alla
 chiusura, e ricaricate al successivo avvio. Il percorso è mostrato nella finestra:
@@ -478,8 +480,10 @@ Ogni strip mostra nickname, fader verticale da −60 a +6 dB (0 dB = gain 1),
 Mute e Solo. Più Solo possono essere attivi insieme; Mute prevale su Solo.
 −60 dB attenua il segnale a 0,001: per silenziarlo completamente usare Mute.
 Le modifiche agiscono solo sul proprio ascolto, tramite gli atomici del mixer.
-Il monitoraggio locale resta disabilitato; JAM-15 aggiunge una strip di sola misura
-dell’ingresso locale.
+La strip «Ingresso locale» mostra il picco di cattura (JAM-15) e gli stessi
+controlli per il monitoraggio in cuffia (JAM-18). Fader e Mute locali non modificano
+il segnale inviato via UDP. Solo partecipa al mix insieme ai Solo dei peer: un Solo
+locale esclude i peer senza Solo e un Solo remoto esclude l'ingresso senza Solo.
 Le impostazioni dei peer sono temporanee e tornano ai valori iniziali alla loro
 uscita o alla riconnessione.
 
@@ -532,3 +536,27 @@ La pipeline `.github/workflows/release.yml` esegue fmt, clippy, test, build rele
 e installazione di prova su ogni piattaforma. I branch `codex/release-*` producono
 artefatti di verifica; un tag `1.*-beta-*` uguale alla versione Cargo pubblica la
 prerelease solo dopo il successo di tutte e quattro le build, con checksum SHA-256.
+
+### 15. Monitoraggio locale in cuffia — JAM-18
+
+La callback di cattura invia il primo canale sia alla rete sia a un ring SPSC
+`rtrb` dedicato al mixer, senza passare dal worker UDP, dal codec o dal jitter buffer.
+Il volume iniziale è 0 dB, con Mute e Solo disattivati. Il mixer non attende un
+prefill locale: riproduce subito i campioni disponibili su tutti i canali di uscita,
+applica gain/Mute/Solo e il soft clipping comune al mix. I controlli si azzerano
+alla nuova sessione; il meter resta prima del fader.
+
+A ogni callback di uscita il consumer conserva al massimo una callback di campioni
+recenti (64/128/256 frame nella GUI, circa 1,3/2,7/5,3 ms a 48 kHz, oltre ai buffer
+hardware). Le posizioni dei campioni avanzano anche quando il ring è pieno:
+dopo un ritardo dell'output, l'audio vecchio viene scartato con lavoro limitato alla
+capacità del ring. Se tutti i campioni disponibili sono stantii, l'uscita resta
+silenziosa fino alla nuova cattura. Mute e Solo continuano a consumare il ring.
+Nessun lock, allocazione o I/O viene aggiunto ai callback audio.
+
+I test coprono gain/Mute/Solo locali e remoti, indipendenza dal PCM destinato alla
+rete anche in overflow, partenza senza peer, underflow, valori non finiti,
+recupero dopo output ritardato, wrap delle posizioni e zero allocazioni.
+Verifica manuale con scheda audio e cuffie: collegare lo strumento, connettersi,
+regolare la strip «Ingresso locale» e verificare con un secondo musicista che il
+segnale ricevuto resti invariato mentre si modifica il proprio ascolto.
