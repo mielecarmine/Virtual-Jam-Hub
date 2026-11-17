@@ -335,25 +335,29 @@ Il playback attende inizialmente **3 chunk (7,5 ms)** e riordina i numeri di seq
 `--jitter-chunks N` permette un ritardo iniziale da 1 a 16 chunk. Questo ritardo
 si aggiunge al prefill del ring audio e ai buffer del dispositivo.
 
-I frame duplicati già in coda e quelli tardivi vengono scartati. Un frame tardivo
-fa crescere il target di un chunk fino a 16 (40 ms), inserendo un frame di
-compensazione senza fermare il playback. Dopo ogni secondo senza pacchetti tardivi,
+I frame duplicati già in coda e quelli tardivi vengono scartati. Tre frame tardivi
+recenti e distinti fanno crescere il target di un chunk, fino a 8 (20 ms);
+un valore iniziale esplicito superiore a 8 viene rispettato. I duplicati tardivi
+e i frame scartati intenzionalmente non alimentano questo adattamento.
+L'aumento inserisce un frame PLC senza fermare il playback. Dopo ogni secondo senza pacchetti tardivi,
 il target scende di un chunk verso il valore configurato. La coda è limitata
-a target + 2 chunk (massimo 45 ms), contando anche i buchi di sequenza;
+a target + 3 chunk, contando anche i buchi di sequenza;
 i frame vecchi vengono scartati e il decoder del solo peer viene riallineato.
 I frame mancanti vengono sintetizzati dal PLC del decoder Opus del peer.
 Con il crate `opus`, `decode_float(&[], &mut output, false)` rappresenta un
 pacchetto perso: il flag FEC resta disattivato, perché CELT non usa il FEC SILK.
 Anche un payload corrotto rilevato in decodifica viene trattato come perdita.
-Il frame di compensazione per aumentare il target ripete l'ultima uscita attenuata
-(fattore 0,8), senza avanzare il decoder rispetto ai pacchetti accodati.
+Anche il frame di compensazione usa il PLC Opus senza consumare i pacchetti accodati.
+I piccoli riallineamenti fanno avanzare il decoder senza azzerarne la storia.
 Una grande discontinuità di sequenza reinizializza coda e decoder del solo peer
 interessato; gli altri decoder conservano la propria storia.
 La lista peer e un timeout di 5 secondi eliminano gli stati non più attivi.
 
-Il worker produce al massimo un chunk per scadenza (2,5 ms), senza recuperare
-ritardi con raffiche. I tick persi avanzano anche il cursore di ciascun peer,
-rispettando il suo prefill iniziale e mantenendo la fase del clock di playout.
+Il worker inserisce tutti i pacchetti maturati prima di avanzare il playout.
+Normalmente produce un chunk per scadenza (2,5 ms); dopo un ritardo può recuperarne
+fino a quattro per peer, entro lo spazio libero e il limite di 10 ms del ring SPSC.
+Scarta soltanto le scadenze che eccedono questo budget, rispettando il prefill
+iniziale di ciascun peer e mantenendo la fase del clock di playout.
 Invia ogni peer pronto al suo ring SPSC dedicato; un ring
 pieno scarta soltanto il chunk di quel peer. Il mix avviene nel callback audio
 come descritto in JAM-11. I callback `cpal` restano senza allocazioni, lock o I/O.

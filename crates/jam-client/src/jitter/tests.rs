@@ -103,17 +103,20 @@ fn late_frame_hold_uses_plc_and_resumes_queued_audio_continuously() {
             decode(&mut reference, &frame)
         );
     }
-    let late = encode(&mut encoder, 0.5);
-    let previous = buffer.pop(ready).unwrap().unwrap();
-    assert_eq!(previous, decode(&mut reference, &[]));
-    buffer.insert(20, &late, ready).unwrap();
+    let mut previous = [0.0; FRAME_SAMPLES];
+    for sequence in 20..23 {
+        let late = encode(&mut encoder, 0.5);
+        previous = buffer.pop(ready).unwrap().unwrap();
+        assert_eq!(previous, decode(&mut reference, &[]));
+        buffer.insert(sequence, &late, ready).unwrap();
+    }
     assert_eq!(buffer.target, 4);
     let next = encode(&mut encoder, 0.5);
-    buffer.insert(21, &next, ready).unwrap();
+    buffer.insert(23, &next, ready).unwrap();
     let held = buffer.pop(ready).unwrap().unwrap();
     assert_eq!(held, decode(&mut reference, &[]));
     assert_ne!(held, previous.map(|sample| sample * 0.8));
-    assert_eq!(buffer.next, 21, "hold must preserve the queued sequence");
+    assert_eq!(buffer.next, 23, "hold must preserve the queued sequence");
     assert_continuous(&previous, &held);
     let resumed = buffer.pop(ready).unwrap().unwrap();
     assert_eq!(resumed, decode(&mut reference, &next));
@@ -136,12 +139,13 @@ fn stable_target_decay_trims_without_resetting_codec_history() {
         previous = buffer.pop(ready).unwrap().unwrap();
         assert_eq!(previous, decode(&mut reference, &frame));
     }
-    // Grow headroom twice using late packets; the queued backlog later forces trims.
+    // Exercise two PLC holds; adaptation thresholds are tested separately.
     for sequence in 20..22 {
         let frame = encode(&mut encoder, 0.5);
         frames.push(frame);
         buffer.insert(sequence, &frame, ready).unwrap();
-        buffer.insert(0, &frames[0], ready).unwrap();
+        buffer.target += 1;
+        buffer.hold = true;
         let held = buffer.pop(ready).unwrap().unwrap();
         assert_eq!(held, decode(&mut reference, &[]));
         assert_continuous(&previous, &held);
@@ -149,7 +153,7 @@ fn stable_target_decay_trims_without_resetting_codec_history() {
     }
     assert_eq!(buffer.target, 5);
     // Fill the permitted span (including queue slack) before stability shrinks it.
-    for sequence in 22..26 {
+    for sequence in 22..27 {
         let frame = encode(&mut encoder, 0.5);
         frames.push(frame);
         buffer.insert(sequence, &frame, ready).unwrap();
@@ -162,6 +166,7 @@ fn stable_target_decay_trims_without_resetting_codec_history() {
         let now = ready + CHUNK_TIME * tick;
         let before = buffer.next;
         buffer.insert(sequence, &frame, now).unwrap();
+        buffer.trim_backlog().unwrap();
         for skipped in before..buffer.next {
             decode(&mut reference, &frames[skipped as usize]);
             trims += 1;
@@ -201,7 +206,9 @@ fn short_deadline_skips_decode_packets_and_conceal_holes_across_wrap() {
     decode(&mut reference, &[]);
     let resumed = encode(&mut encoder, 0.5);
     buffer.insert(1, &resumed, ready).unwrap();
-    buffer.skip_missed(ready, ready + CHUNK_TIME * 2).unwrap();
+    buffer
+        .playout_frames(ready, ready + CHUNK_TIME * 2, 1)
+        .unwrap();
     assert_eq!(buffer.next, 1);
     assert_eq!(
         buffer.pop(ready).unwrap().unwrap(),
@@ -287,25 +294,31 @@ fn stable_stream_returns_to_nominal_after_late_packets() {
     let ready = buffer.ready_at;
     buffer.insert(0, &frame, start).unwrap();
     buffer.pop(ready).unwrap();
-    // Repeated late frames consume holds and raise headroom to the maximum.
-    for sequence in 1..=13 {
-        buffer.insert(sequence, &frame, ready).unwrap();
-        buffer.insert(0, &frame, ready).unwrap();
-        buffer.pop(ready).unwrap();
+    // Sustained real lateness (three distinct missed frames per increase).
+    let mut sequence = 1;
+    for _ in 0..20 {
+        for _ in 0..LATE_THRESHOLD {
+            buffer.pop(ready).unwrap();
+            buffer.insert(sequence, &frame, ready).unwrap();
+            sequence += 1;
+        }
+        if buffer.hold {
+            buffer.pop(ready).unwrap(); // Consume the PLC hold only when headroom grew.
+        }
     }
-    assert_eq!(buffer.target, MAX_TARGET);
-    let mut sequence = 14;
+    assert_eq!(buffer.target, MAX_ADAPTIVE_TARGET);
     let mut maximum = 0.0_f64;
     for tick in 1..=6000 {
         let now = ready + CHUNK_TIME * tick;
         buffer.insert(sequence, &frame, now).unwrap();
         sequence = sequence.wrapping_add(1);
+        buffer.trim_backlog().unwrap();
         buffer.pop(now).unwrap();
         maximum = maximum.max(buffer.buffered_ms());
     }
     assert_eq!(buffer.target, buffer.nominal_target);
     assert!(buffer.buffered_ms() <= 10.0);
-    assert!(maximum <= 45.0);
+    assert!(maximum <= 27.5);
 }
 
 #[test]
@@ -318,15 +331,16 @@ fn backlog_is_bounded_by_sequence_span_including_wrap_and_holes() {
         buffer
             .insert(initial.wrapping_add(offset), &frame, start)
             .unwrap();
-        assert!(buffer.buffered_ms() <= 12.5);
+        buffer.trim_backlog().unwrap();
+        assert!(buffer.buffered_ms() <= 15.0);
     }
-    assert_eq!(buffer.next, initial.wrapping_add(55));
+    assert_eq!(buffer.next, initial.wrapping_add(54));
     assert!(
         buffer
             .slots
             .iter()
             .flatten()
-            .all(|(seq, _)| seq.wrapping_sub(buffer.next) < 5)
+            .all(|(seq, _)| seq.wrapping_sub(buffer.next) < 6)
     );
 }
 
@@ -334,9 +348,13 @@ fn backlog_is_bounded_by_sequence_span_including_wrap_and_holes() {
 fn missed_deadlines_respect_startup_and_skip_large_stalls_in_constant_work() {
     let start = Instant::now();
     let mut buffer = PeerJitterBuffer::new(u32::MAX - 2, start, 3).unwrap();
-    buffer.skip_missed(start, start + CHUNK_TIME * 2).unwrap();
+    buffer
+        .playout_frames(start, start + CHUNK_TIME * 2, 1)
+        .unwrap();
     assert_eq!(buffer.next, u32::MAX - 2);
-    buffer.skip_missed(start, start + CHUNK_TIME * 10).unwrap();
+    buffer
+        .playout_frames(start, start + CHUNK_TIME * 10, 1)
+        .unwrap();
     assert_eq!(buffer.next, 4);
     assert!(buffer.started);
     let frame = encode(&mut encoder().unwrap(), 0.5);
@@ -351,8 +369,110 @@ fn missed_deadlines_respect_startup_and_skip_large_stalls_in_constant_work() {
 fn peer_starting_between_global_ticks_does_not_skip_its_first_frame() {
     let start = Instant::now();
     let mut buffer = PeerJitterBuffer::new(100, start + Duration::from_micros(700), 3).unwrap();
-    buffer.skip_missed(start, start + CHUNK_TIME * 4).unwrap();
+    buffer
+        .playout_frames(start, start + CHUNK_TIME * 4, 1)
+        .unwrap();
     assert_eq!(buffer.next, 100);
-    buffer.skip_missed(start, start + CHUNK_TIME * 5).unwrap();
+    buffer
+        .playout_frames(start, start + CHUNK_TIME * 5, 1)
+        .unwrap();
     assert_eq!(buffer.next, 101);
+}
+
+#[test]
+fn delayed_receive_batch_is_decoded_in_order_without_target_growth_across_wrap() {
+    let start = Instant::now();
+    let initial = u32::MAX - 1;
+    let mut buffer = PeerJitterBuffer::new(initial, start, 3).unwrap();
+    let mut encoder = encoder().unwrap();
+    let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+    let ready = buffer.ready_at;
+    // All packets from this delayed tick are inserted before recovering deadlines.
+    for offset in 0..6 {
+        let frame = encode(&mut encoder, 0.5);
+        buffer
+            .insert(initial.wrapping_add(offset), &frame, ready + CHUNK_TIME * 2)
+            .unwrap();
+    }
+    assert_eq!(
+        buffer.next, initial,
+        "insertion must not trim a receive batch"
+    );
+    let frames = buffer
+        .playout_frames(ready, ready + CHUNK_TIME * 2, 4)
+        .unwrap();
+    assert_eq!(frames, 3);
+    let mut encoder = crate::codec::encoder().unwrap();
+    for _ in 0..frames {
+        let frame = encode(&mut encoder, 0.5);
+        assert_eq!(
+            buffer.pop(ready).unwrap().unwrap(),
+            decode(&mut reference, &frame)
+        );
+    }
+    assert_eq!(buffer.next, 1);
+    assert_eq!(buffer.target, 3);
+    assert_eq!(buffer.buffered_ms(), 7.5);
+}
+
+#[test]
+fn isolated_lateness_and_duplicate_replays_do_not_inflate_target() {
+    let start = Instant::now();
+    let frame = encode(&mut encoder().unwrap(), 0.5);
+    let mut buffer = PeerJitterBuffer::new(0, start, 3).unwrap();
+    let ready = buffer.ready_at;
+    buffer.pop(ready).unwrap();
+    for _ in 0..100 {
+        buffer.insert(0, &frame, ready).unwrap();
+    }
+    assert_eq!(buffer.target, 3);
+    assert!(!buffer.hold);
+    // Distinct isolated late frames separated by stable windows also stay nominal.
+    for sequence in 1..10 {
+        let now = ready + STABLE_WINDOW * sequence;
+        buffer.pop(now).unwrap();
+        buffer.insert(sequence, &frame, now).unwrap();
+        assert_eq!(buffer.target, 3);
+    }
+}
+
+#[test]
+fn catch_up_respects_each_peers_startup_and_downstream_capacity() {
+    let start = Instant::now();
+    for capacity in 0..=4 {
+        let mut buffer = PeerJitterBuffer::new(100, start, 3).unwrap();
+        let ready = buffer.ready_at;
+        let frames = buffer
+            .playout_frames(ready, ready + CHUNK_TIME * 5, capacity)
+            .unwrap();
+        assert_eq!(frames, u32::try_from(capacity.max(1)).unwrap());
+        assert_eq!(buffer.next, 106 - frames);
+    }
+    let mut later = PeerJitterBuffer::new(100, start + Duration::from_micros(700), 3).unwrap();
+    assert_eq!(
+        later
+            .playout_frames(start, start + CHUNK_TIME * 5, 4)
+            .unwrap(),
+        2
+    );
+    assert_eq!(later.next, 100);
+}
+
+#[test]
+fn intentionally_skipped_frames_do_not_count_as_network_lateness() {
+    let start = Instant::now();
+    let mut buffer = PeerJitterBuffer::new(0, start, 3).unwrap();
+    let ready = buffer.ready_at;
+    let frame = encode(&mut encoder().unwrap(), 0.5);
+    buffer
+        .playout_frames(ready, ready + CHUNK_TIME * 5, 1)
+        .unwrap();
+    for sequence in 0..5 {
+        buffer
+            .insert(sequence, &frame, ready + CHUNK_TIME * 5)
+            .unwrap();
+    }
+    assert_eq!(buffer.target, 3);
+    assert_eq!(buffer.late_count, 0);
+    assert!(!buffer.hold);
 }
