@@ -24,3 +24,8 @@ workspace = true
 
 [dev-dependencies]
 jam-server = { path = "../jam-server" }
+
+[[example]]
+name = "net_bench"
+path = "src/net_bench.rs"
+test = true
