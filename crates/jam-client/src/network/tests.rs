@@ -510,7 +510,11 @@ fn four_remote_peers_reach_the_hardware_mixer_through_the_real_sfu() {
             }
             let (net, _, mic, rx, mixer) = &mut clients[4];
             let ready = net.peers.values().map(|peer| peer.ready_at).max().unwrap();
-            net.tick(mic, rx, ready).unwrap();
+            // Prefill the remote SPSC queues before the first hardware callback.
+            // The first decoded frame remains at the head; subsequent ticks supply the reserve.
+            for tick in 0..3 {
+                net.tick(mic, rx, ready + CHUNK_TIME * tick).unwrap();
+            }
             let mut output = [0.0_f32; FRAME_SAMPLES * 2];
             mixer.playback(&mut output, 2, &crate::audio::Stats::default());
             let decoded = crate::codec::tests::decode(&packet(2, 0.8)[AUDIO_HEADER_SIZE..]);

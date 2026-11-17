@@ -10,7 +10,8 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{audio::Stats, codec::FRAME_SAMPLES};
 
-// At 48 kHz these budgets are 10 ms queued and 5 ms after realignment.
+// At 48 kHz: at most 10 ms queued, with a 5 ms reserve AFTER the current callback.
+// The reserve covers one 120-sample production interval plus up to 1.5 ms worker jitter.
 const MAX_RX_SAMPLES: usize = FRAME_SAMPLES * 4;
 const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 2;
 
@@ -53,6 +54,8 @@ pub struct Mixer {
     pub controls: Arc<[Controls; MAX_PEERS]>,
     local_control: Arc<Controls>,
     local: Option<crate::monitor::Playback>,
+    epochs: [u32; MAX_PEERS],
+    ready: [bool; MAX_PEERS],
 }
 
 pub fn channels() -> (RxChannels, Mixer) {
@@ -78,6 +81,8 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
             controls,
             local_control,
             local: None,
+            epochs: [0; MAX_PEERS],
+            ready: [false; MAX_PEERS],
         },
     )
 }
@@ -125,6 +130,41 @@ impl Mixer {
         capture
     }
 
+    fn align(&mut self, frames: usize) {
+        // Only the consumer discards audio. Snapshot each queue so work stays bounded.
+        // Keep the callback's demand AND the reserve, rather than consuming the reserve.
+        let target = frames.saturating_add(RX_TARGET_SAMPLES);
+        for (index, ring) in self.rings.iter_mut().enumerate() {
+            let epoch = self.controls[index].epoch.load(Ordering::Relaxed);
+            if self.epochs[index] != epoch {
+                self.epochs[index] = epoch;
+                self.ready[index] = false;
+            }
+            // Old generations must not count towards a new peer's prefill.
+            for _ in 0..ring.slots() {
+                if ring
+                    .peek()
+                    .is_ok_and(|sample| sample.epoch != epoch || epoch % 2 == 0)
+                {
+                    let _ = ring.pop();
+                } else {
+                    break;
+                }
+            }
+            let queued = ring.slots();
+            if queued > target {
+                for _ in 0..queued - target {
+                    let _ = ring.pop();
+                }
+            }
+            // A hardware block larger than the ring budget must still be able to start.
+            let prefill = target.min(ring.buffer().capacity()).min(MAX_RX_SAMPLES);
+            if epoch % 2 != 0 && queued >= prefill {
+                self.ready[index] = true;
+            }
+        }
+    }
+
     pub fn playback<T: Sample + FromSample<f32>>(
         &mut self,
         data: &mut [T],
@@ -140,16 +180,8 @@ impl Mixer {
         if let Some(local) = &mut self.local {
             local.align(data.len() / channels);
         }
-        // Only the consumer may discard old samples. Snapshot the count so work is bounded
-        // even while the UDP producer runs, and retain the most recent 5 ms.
-        for ring in &mut self.rings {
-            let queued = ring.slots();
-            if queued > RX_TARGET_SAMPLES {
-                for _ in 0..queued - RX_TARGET_SAMPLES {
-                    let _ = ring.pop();
-                }
-            }
-        }
+        self.align(data.len() / channels);
+        let mut starved = [false; MAX_PEERS];
         let mut peaks = [0.0_f32; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
             let solo = (self.local.is_some() && self.local_control.solo.load(Ordering::Relaxed))
@@ -174,13 +206,17 @@ impl Mixer {
                     sum += f64::from(value) * f64::from(gain);
                 }
             }
-            for ((ring, control), peak) in self
+            for (index, ((ring, control), peak)) in self
                 .rings
                 .iter_mut()
                 .zip(self.controls.iter())
                 .zip(peaks.iter_mut())
+                .enumerate()
             {
                 let epoch = control.epoch.load(Ordering::Relaxed);
+                if !self.ready[index] || epoch != self.epochs[index] || epoch % 2 == 0 {
+                    continue;
+                }
                 // Bounded by the queue capacity, including stale samples after a disconnect.
                 let mut sample = None;
                 for _ in 0..ring.slots() {
@@ -191,10 +227,8 @@ impl Mixer {
                         }
                     }
                 }
-                if epoch % 2 == 0 {
-                    continue;
-                }
                 let value = sample.unwrap_or_else(|| {
+                    starved[index] = true;
                     stats.output_underflows.fetch_add(1, Ordering::Relaxed);
                     0.0
                 });
@@ -214,6 +248,11 @@ impl Mixer {
             #[allow(clippy::cast_possible_truncation)]
             let output = sum.tanh() as f32;
             frame.fill(T::from_sample(output));
+        }
+        for (ready, starved) in self.ready.iter_mut().zip(starved) {
+            if starved {
+                *ready = false;
+            }
         }
         for (control, peak) in self.controls.iter().zip(peaks) {
             control.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
