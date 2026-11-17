@@ -11,6 +11,8 @@ mod monitor;
 mod network;
 mod setup;
 mod streams;
+#[cfg(feature = "telemetry-log")]
+mod telemetry_log;
 
 use std::{
     error::Error,

@@ -599,3 +599,40 @@ best effort). Il report non misura la latenza audio end-to-end di dispositivi fi
 
 Il test localhost a tre peer e i test di aggregazione vengono eseguiti anche da
 `cargo test --workspace`, oppure con `cargo test -p jam-client --example net_bench`.
+
+### Logging delle sessioni desktop di pre-release — JAM-20
+
+Gli installer di pre-release abilitano automaticamente la feature `telemetry-log`
+quando la versione Cargo contiene un suffisso SemVer (alpha, beta, rc o altro).
+Le build standard e gli installer con versione stabile compilano senza logger.
+Per provarlo localmente:
+
+```bash
+cargo run -p jam-client --features telemetry-log
+```
+
+Ogni connessione dalla GUI crea un file `telemetry-*.txt` accanto a `client.toml`.
+Per scegliere una directory di prova, impostare `JAM_CLIENT_CONFIG` al percorso
+completo del file di configurazione, ad esempio `/tmp/jam-test/client.toml`.
+Il logger scrive e scarica il buffer su file nel solo thread `jam-controller`;
+le callback audio e il worker CLI `udp-network` non eseguono scritture di log.
+Il percorso diagnostico CLI e il benchmark headless mantengono i propri report.
+
+L'header riporta versione, OS, backend e dispositivi effettivamente aperti,
+buffer hardware richiesto ed endpoint. I campioni ogni 500 ms includono peer
+remoti (escluso il client locale), RTT, jitter, perdita, buffer di rete e contatori
+cumulativi di overflow/underflow in campioni audio. Un RTT non disponibile è
+`N/A` ed è escluso dalle statistiche. Il buffer di rete esclude code hardware/SPSC.
+Alla disconnessione, errore di sessione o chiusura ordinata, il riepilogo riporta
+minimo, media, p95 (nearest rank) e massimo di tutti i campioni della sessione.
+Le sessioni più brevi del primo intervallo possono avere zero campioni.
+Gli arresti forzati mantengono i campioni già scaricati, ma non il riepilogo finale.
+Le statistiche esatte conservano i campioni in memoria per la durata della sessione.
+Un errore di apertura/scrittura viene segnalato senza interrompere l'audio;
+un errore durante la finalizzazione viene riportato su stderr.
+
+La pipeline verifica entrambe le configurazioni. I test del logger si eseguono con:
+
+```bash
+cargo test --workspace --features jam-client/telemetry-log
+```
