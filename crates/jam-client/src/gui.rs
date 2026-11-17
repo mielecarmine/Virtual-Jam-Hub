@@ -238,10 +238,11 @@ impl AppState {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(85.0);
+                    ui.set_width(110.0);
                     ui.vertical_centered(|ui| {
                         ui.strong("Ingresso locale");
                         self.meters[0].show(ui, &view.stats.input_peak);
+                        monitoring_controls(ui, &view.local_control);
                     });
                 });
                 for peer in &view.peers {
@@ -254,28 +255,7 @@ impl AppState {
                                 ));
                                 let control = &view.controls[usize::from(peer.peer_id) - 1];
                                 self.meters[usize::from(peer.peer_id)].show(ui, &control.peak);
-                                let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
-                                let mut db = gain_to_db(gain);
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut db, -60.0..=6.0)
-                                            .vertical()
-                                            .suffix(" dB"),
-                                    )
-                                    .changed()
-                                {
-                                    control
-                                        .gain
-                                        .store(db_to_gain(db).to_bits(), Ordering::Relaxed);
-                                }
-                                let mut mute = control.mute.load(Ordering::Relaxed);
-                                let mut solo = control.solo.load(Ordering::Relaxed);
-                                if ui.toggle_value(&mut mute, "M · Mute").changed() {
-                                    control.mute.store(mute, Ordering::Relaxed);
-                                }
-                                if ui.toggle_value(&mut solo, "S · Solo").changed() {
-                                    control.solo.store(solo, Ordering::Relaxed);
-                                }
+                                monitoring_controls(ui, control);
                             });
                         });
                     });
@@ -382,8 +362,8 @@ impl eframe::App for AppState {
                 ui.heading("Virtual Jam");
                 ui.label("Collega il tuo strumento e raggiungi la band.");
                 ui.small(
-                    "Usa le cuffie. Il tuo ingresso viene inviato ai peer, \
-                     senza monitoraggio locale.",
+                    "Usa le cuffie. I controlli di Ingresso locale regolano solo il tuo ascolto; \
+                     il segnale inviato ai peer resta invariato.",
                 );
                 ui.add_space(16.0);
                 self.setup(ui);
@@ -523,5 +503,30 @@ impl Meter {
                 },
             ),
         );
+    }
+}
+
+fn monitoring_controls(ui: &mut egui::Ui, control: &crate::mixer::Controls) {
+    let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
+    let mut db = gain_to_db(gain);
+    if ui
+        .add(
+            egui::Slider::new(&mut db, -60.0..=6.0)
+                .vertical()
+                .suffix(" dB"),
+        )
+        .changed()
+    {
+        control
+            .gain
+            .store(db_to_gain(db).to_bits(), Ordering::Relaxed);
+    }
+    let mut mute = control.mute.load(Ordering::Relaxed);
+    let mut solo = control.solo.load(Ordering::Relaxed);
+    if ui.toggle_value(&mut mute, "M · Mute").changed() {
+        control.mute.store(mute, Ordering::Relaxed);
+    }
+    if ui.toggle_value(&mut solo, "S · Solo").changed() {
+        control.solo.store(solo, Ordering::Relaxed);
     }
 }

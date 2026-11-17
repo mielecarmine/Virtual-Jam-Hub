@@ -30,15 +30,25 @@ pub fn input(
     device: &cpal::Device,
     config: &AudioConfig,
     producer: Producer<f32>,
+    monitor: Option<crate::monitor::Capture>,
     stats: Arc<Stats>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    dispatch_format!(config.format, build_input, device, config, producer, stats)
+    dispatch_format!(
+        config.format,
+        build_input,
+        device,
+        config,
+        producer,
+        monitor,
+        stats
+    )
 }
 
 fn build_input<T: SizedSample>(
     device: &cpal::Device,
     config: &AudioConfig,
     mut producer: Producer<f32>,
+    mut monitor: Option<crate::monitor::Capture>,
     stats: Arc<Stats>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
@@ -49,7 +59,7 @@ where
     device.build_input_stream(
         &config.stream,
         move |data: &[T], _| {
-            audio::capture(data, channels, &mut producer, &stats);
+            audio::capture(data, channels, &mut producer, monitor.as_mut(), &stats);
         },
         move |_| {
             errors.input_errors.fetch_add(1, Ordering::Relaxed);
@@ -63,7 +73,7 @@ pub enum Playback {
         consumer: Consumer<f32>,
         started: bool,
     },
-    Mix(crate::mixer::Mixer),
+    Mix(Box<crate::mixer::Mixer>),
 }
 
 pub fn output(
