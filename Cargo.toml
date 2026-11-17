@@ -3,7 +3,7 @@ members = ["crates/jam-protocol", "crates/jam-server", "crates/jam-client"]
 resolver = "2"
 
 [workspace.package]
-version = "1.0.1-beta"
+version = "1.0.1-beta2"
 edition = "2024"
 rust-version = "1.85"
 
