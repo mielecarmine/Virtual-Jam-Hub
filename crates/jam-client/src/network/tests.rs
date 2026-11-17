@@ -246,8 +246,8 @@ fn two_clients_exchange_opus_through_real_sfu_without_echo() {
                 thread::sleep(Duration::from_millis(1));
             }
             assert_ne!(a.peer_id, b.peer_id);
-            let a_output = &mut a_mixer.rings[usize::from(b.peer_id.unwrap()) - 1];
-            let b_output = &mut b_mixer.rings[usize::from(a.peer_id.unwrap()) - 1];
+            let a_remote = b.peer_id.unwrap();
+            let b_remote = a.peer_id.unwrap();
             for (a_sample, b_sample) in crate::codec::tests::tone(0.25)
                 .into_iter()
                 .zip(crate::codec::tests::tone(-0.5))
@@ -255,12 +255,20 @@ fn two_clients_exchange_opus_through_real_sfu_without_echo() {
                 a_input.push(a_sample).unwrap();
                 b_input.push(b_sample).unwrap();
             }
-            while a_output.slots() < FRAME_SAMPLES || b_output.slots() < FRAME_SAMPLES {
+            // Hold the playout clock while the real UDP transport delivers the frames.
+            // A descheduled CI runner must not skip the first frame as stale audio.
+            let now = Instant::now();
+            while !a.peers.contains_key(&a_remote) || !b.peers.contains_key(&b_remote) {
                 assert!(Instant::now() < deadline, "audio timeout");
-                a.tick(&mut a_mic, &mut a_speaker, Instant::now()).unwrap();
-                b.tick(&mut b_mic, &mut b_speaker, Instant::now()).unwrap();
+                a.tick(&mut a_mic, &mut a_speaker, now).unwrap();
+                b.tick(&mut b_mic, &mut b_speaker, now).unwrap();
                 thread::sleep(Duration::from_millis(1));
             }
+            let ready = a.peers[&a_remote].ready_at.max(b.peers[&b_remote].ready_at);
+            a.tick(&mut a_mic, &mut a_speaker, ready).unwrap();
+            b.tick(&mut b_mic, &mut b_speaker, ready).unwrap();
+            let a_output = &mut a_mixer.rings[usize::from(a_remote) - 1];
+            let b_output = &mut b_mixer.rings[usize::from(b_remote) - 1];
             let expected_a = crate::codec::tests::decode(&packet(2, -0.5)[AUDIO_HEADER_SIZE..]);
             let expected_b = crate::codec::tests::decode(&packet(2, 0.25)[AUDIO_HEADER_SIZE..]);
             for (a, b) in expected_a.into_iter().zip(expected_b) {
@@ -478,27 +486,31 @@ fn four_remote_peers_reach_the_hardware_mixer_through_the_real_sfu() {
             }
             let remote_ids: Vec<_> = clients[..4]
                 .iter()
-                .map(|(net, ..)| usize::from(net.peer_id.unwrap()) - 1)
+                .map(|(net, ..)| net.peer_id.unwrap())
                 .collect();
             for (_, input, ..) in &mut clients[..4] {
                 for sample in crate::codec::tests::tone(0.8) {
                     input.push(sample).unwrap();
                 }
             }
+            // Receive every peer at a fixed playout time, independently of OS scheduling.
+            let now = Instant::now();
             loop {
                 assert!(Instant::now() < deadline, "audio timeout");
                 for (net, _, mic, rx, _) in &mut clients {
-                    net.tick(mic, rx, Instant::now()).unwrap();
+                    net.tick(mic, rx, now).unwrap();
                 }
                 if remote_ids
                     .iter()
-                    .all(|&id| clients[4].4.rings[id].slots() >= FRAME_SAMPLES)
+                    .all(|id| clients[4].0.peers.contains_key(id))
                 {
                     break;
                 }
                 thread::sleep(Duration::from_millis(1));
             }
-            let (_, _, _, _, mixer) = &mut clients[4];
+            let (net, _, mic, rx, mixer) = &mut clients[4];
+            let ready = net.peers.values().map(|peer| peer.ready_at).max().unwrap();
+            net.tick(mic, rx, ready).unwrap();
             let mut output = [0.0_f32; FRAME_SAMPLES * 2];
             mixer.playback(&mut output, 2, &crate::audio::Stats::default());
             let decoded = crate::codec::tests::decode(&packet(2, 0.8)[AUDIO_HEADER_SIZE..]);
