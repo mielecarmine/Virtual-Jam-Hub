@@ -130,3 +130,19 @@ fn peer_peaks_are_independent_pre_fader_and_reset_on_removal() {
     rx.remove(2);
     assert_eq!(rx.controls[1].peak.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn receive_queue_is_capped_and_callback_discards_oldest_samples() {
+    let (mut rx, mut mixer) = channels();
+    let stats = Stats::default();
+    rx.push(1, &[0.8; RX_TARGET_SAMPLES]);
+    rx.push(1, &[-0.5; RX_TARGET_SAMPLES]);
+    rx.push(1, &[0.1; FRAME_SAMPLES]);
+    assert_eq!(mixer.rings[0].slots(), MAX_RX_SAMPLES);
+    rx.push(2, &[0.25; FRAME_SAMPLES]);
+    let mut out = [0.0; FRAME_SAMPLES];
+    mixer.playback(&mut out, 1, &stats);
+    assert!(out.iter().all(|v| (*v - (-0.25_f32).tanh()).abs() < 1e-6));
+    assert_eq!(mixer.rings[0].slots(), FRAME_SAMPLES);
+    assert_eq!(mixer.rings[1].slots(), 0);
+}

@@ -717,3 +717,33 @@ fn oversized_datagrams_are_dropped_and_valid_handshake_still_succeeds() {
         .unwrap();
     assert!(network.is_connected());
 }
+
+#[test]
+fn repeated_worker_stalls_preserve_clock_phase_and_nominal_buffering() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+    let (mut speaker, mut mixer) = crate::mixer::channels();
+    let start = network.started;
+    for sequence in 0..400_u32 {
+        let at = start + CHUNK_TIME * sequence;
+        let mut bytes = packet(2, 0.25);
+        AudioHeader::new(2, STREAM_PRIMARY, sequence, 0)
+            .to_bytes(&mut bytes)
+            .unwrap();
+        network.incoming(&bytes, 1, at);
+        // Wake only every fourth deadline, with a fractional scheduling offset.
+        if sequence % 4 == 0 {
+            let now = at + Duration::from_micros(700);
+            network.playback(&mut speaker, now).unwrap();
+            assert!(network.peers[&2].buffered_ms() <= 10.0);
+            assert!(mixer.rings[1].slots() <= FRAME_SAMPLES);
+            while mixer.rings[1].pop().is_ok() {}
+            if sequence >= 4 {
+                assert_eq!(
+                    network.next_playout.unwrap(),
+                    start + CHUNK_TIME * (sequence + 1) + Duration::from_micros(700)
+                );
+            }
+        }
+    }
+}

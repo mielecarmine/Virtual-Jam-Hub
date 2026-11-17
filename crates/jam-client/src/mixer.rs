@@ -8,7 +8,11 @@ use cpal::{FromSample, Sample};
 use jam_protocol::MAX_PEERS;
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::audio::{RING_CAPACITY, Stats};
+use crate::{audio::Stats, codec::FRAME_SAMPLES};
+
+// At 48 kHz these budgets are 10 ms queued and 5 ms after realignment.
+const MAX_RX_SAMPLES: usize = FRAME_SAMPLES * 4;
+const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 2;
 
 pub struct Controls {
     pub peak: AtomicU32,
@@ -49,7 +53,7 @@ pub struct Mixer {
 }
 
 pub fn channels() -> (RxChannels, Mixer) {
-    channels_with_capacity(RING_CAPACITY)
+    channels_with_capacity(MAX_RX_SAMPLES)
 }
 
 pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
@@ -78,7 +82,9 @@ impl RxChannels {
                 .wrapping_add(1);
         }
         let ring = &mut self.rings[index];
-        if ring.slots() >= chunk.len() {
+        let free = ring.slots();
+        let queued = ring.buffer().capacity() - free;
+        if free >= chunk.len() && queued + chunk.len() <= MAX_RX_SAMPLES {
             for &value in chunk {
                 let _ = ring.push(QueuedSample { value, epoch });
             }
@@ -110,6 +116,16 @@ impl Mixer {
             stats.wrong_buffer_sizes.fetch_add(1, Ordering::Relaxed);
             data.fill(T::EQUILIBRIUM);
             return;
+        }
+        // Only the consumer may discard old samples. Snapshot the count so work is bounded
+        // even while the UDP producer runs, and retain the most recent 5 ms.
+        for ring in &mut self.rings {
+            let queued = ring.slots();
+            if queued > RX_TARGET_SAMPLES {
+                for _ in 0..queued - RX_TARGET_SAMPLES {
+                    let _ = ring.pop();
+                }
+            }
         }
         let mut peaks = [0.0_f32; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
