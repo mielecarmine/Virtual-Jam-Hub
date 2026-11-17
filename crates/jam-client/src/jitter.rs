@@ -102,7 +102,7 @@ impl PeerJitterBuffer {
         Ok(())
     }
 
-    /// Discard elapsed deadlines without decoding or producing a catch-up burst.
+    /// Discard elapsed deadlines without producing a catch-up burst.
     pub fn skip_missed(&mut self, deadline: Instant, now: Instant) -> opus::Result<()> {
         if now > deadline {
             let elapsed = now.duration_since(deadline).as_nanos() / CHUNK_TIME.as_nanos();
@@ -123,17 +123,17 @@ impl PeerJitterBuffer {
 
     fn skip(&mut self, count: u32) -> opus::Result<()> {
         self.started = true;
-        self.next = self.next.wrapping_add(count);
-        for slot in &mut self.slots {
-            if slot
-                .as_ref()
-                .is_some_and(|(seq, _)| seq.wrapping_sub(self.next) >= WINDOW)
-            {
-                *slot = None;
+        if count < WINDOW {
+            // Advance codec history through short trims, including PLC for missing slots.
+            // Work is bounded by the reorder window even after a long suspension.
+            for _ in 0..count {
+                self.decode_next()?;
             }
+            return Ok(());
         }
-        // Decoder history no longer matches the next compressed frame. Work stays bounded
-        // even after a long suspension; do not decode every discarded frame.
+        self.next = self.next.wrapping_add(count);
+        self.slots.fill(None);
+        // Only a discontinuity outside the reorder window discards codec history.
         self.last.fill(0.0);
         self.decoder.reset_state()
     }
@@ -145,12 +145,16 @@ impl PeerJitterBuffer {
         self.started = true;
         if self.hold {
             self.hold = false;
-            // Hold playout without advancing the codec relative to queued packets.
-            for sample in &mut self.last {
-                *sample *= 0.8;
-            }
-            return Ok(Some(self.last));
+            // Extend playout using native PLC, leaving the queued sequence untouched.
+            self.decoder.decode_float(&[], &mut self.last, false)?;
+            self.sanitize_last();
+        } else {
+            self.decode_next()?;
         }
+        Ok(Some(self.last))
+    }
+
+    fn decode_next(&mut self) -> opus::Result<()> {
         let slot = &mut self.slots[self.next as usize % CAPACITY];
         let frame = if slot.as_ref().is_some_and(|(seq, _)| *seq == self.next) {
             slot.take().map(|(_, chunk)| chunk)
@@ -168,6 +172,11 @@ impl PeerJitterBuffer {
             // Corrupt compressed data is a lost frame, never fatal to the room.
             self.decoder.decode_float(&[], &mut self.last, false)?;
         }
+        self.sanitize_last();
+        Ok(())
+    }
+
+    fn sanitize_last(&mut self) {
         for sample in &mut self.last {
             *sample = if sample.is_finite() {
                 sample.clamp(-1.0, 1.0)
@@ -175,7 +184,6 @@ impl PeerJitterBuffer {
                 0.0
             };
         }
-        Ok(Some(self.last))
     }
 }
 

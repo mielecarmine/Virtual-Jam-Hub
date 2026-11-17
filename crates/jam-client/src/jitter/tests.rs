@@ -79,32 +79,157 @@ fn missing_frame_uses_opus_plc_and_recovers_across_sequence_wrap() {
     }
 }
 
+fn assert_continuous(previous: &Chunk, next: &Chunk) {
+    let step = (next[0] - previous[FRAME_SAMPLES - 1]).abs();
+    assert!(
+        step < 0.08,
+        "unexpected jump in a 0.5-amplitude 400 Hz tone: {step}"
+    );
+    assert!(next.iter().any(|sample| sample.abs() > 0.1));
+}
+
 #[test]
-fn late_frame_hold_does_not_advance_decoder_or_replay_the_late_packet() {
+fn late_frame_hold_uses_plc_and_resumes_queued_audio_continuously() {
     let now = Instant::now();
-    let ready = now + CHUNK_TIME * 3;
     let mut buffer = PeerJitterBuffer::new(0, now, 3).unwrap();
+    let ready = buffer.ready_at;
     let mut encoder = encoder().unwrap();
-    let first = encode(&mut encoder, 0.5);
-    buffer.insert(0, &first, now).unwrap();
-    buffer.pop(ready).unwrap();
-    let lost = encode(&mut encoder, 0.5);
-    let plc = buffer.pop(ready).unwrap().unwrap();
-    buffer.insert(1, &lost, ready).unwrap();
+    let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+    for sequence in 0..20 {
+        let frame = encode(&mut encoder, 0.5);
+        buffer.insert(sequence, &frame, now).unwrap();
+        assert_eq!(
+            buffer.pop(ready).unwrap().unwrap(),
+            decode(&mut reference, &frame)
+        );
+    }
+    let late = encode(&mut encoder, 0.5);
+    let previous = buffer.pop(ready).unwrap().unwrap();
+    assert_eq!(previous, decode(&mut reference, &[]));
+    buffer.insert(20, &late, ready).unwrap();
     assert_eq!(buffer.target, 4);
     let next = encode(&mut encoder, 0.5);
-    buffer.insert(2, &next, ready).unwrap();
-    assert_eq!(
-        buffer.pop(ready).unwrap().unwrap(),
-        plc.map(|sample| sample * 0.8)
-    );
+    buffer.insert(21, &next, ready).unwrap();
+    let held = buffer.pop(ready).unwrap().unwrap();
+    assert_eq!(held, decode(&mut reference, &[]));
+    assert_ne!(held, previous.map(|sample| sample * 0.8));
+    assert_eq!(buffer.next, 21, "hold must preserve the queued sequence");
+    assert_continuous(&previous, &held);
+    let resumed = buffer.pop(ready).unwrap().unwrap();
+    assert_eq!(resumed, decode(&mut reference, &next));
+    assert_continuous(&held, &resumed);
+}
+
+#[test]
+fn stable_target_decay_trims_without_resetting_codec_history() {
+    let start = Instant::now();
+    let mut buffer = PeerJitterBuffer::new(0, start, 3).unwrap();
+    let ready = buffer.ready_at;
+    let mut encoder = encoder().unwrap();
     let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
-    decode(&mut reference, &first);
+    let mut frames = Vec::new();
+    let mut previous = [0.0; FRAME_SAMPLES];
+    for sequence in 0..20 {
+        let frame = encode(&mut encoder, 0.5);
+        frames.push(frame);
+        buffer.insert(sequence, &frame, start).unwrap();
+        previous = buffer.pop(ready).unwrap().unwrap();
+        assert_eq!(previous, decode(&mut reference, &frame));
+    }
+    // Grow headroom twice using late packets; the queued backlog later forces trims.
+    for sequence in 20..22 {
+        let frame = encode(&mut encoder, 0.5);
+        frames.push(frame);
+        buffer.insert(sequence, &frame, ready).unwrap();
+        buffer.insert(0, &frames[0], ready).unwrap();
+        let held = buffer.pop(ready).unwrap().unwrap();
+        assert_eq!(held, decode(&mut reference, &[]));
+        assert_continuous(&previous, &held);
+        previous = held;
+    }
+    assert_eq!(buffer.target, 5);
+    // Fill the permitted span (including queue slack) before stability shrinks it.
+    for sequence in 22..26 {
+        let frame = encode(&mut encoder, 0.5);
+        frames.push(frame);
+        buffer.insert(sequence, &frame, ready).unwrap();
+    }
+    let mut trims = 0;
+    for tick in 1..=850 {
+        let sequence = u32::try_from(frames.len()).unwrap();
+        let frame = encode(&mut encoder, 0.5);
+        frames.push(frame);
+        let now = ready + CHUNK_TIME * tick;
+        let before = buffer.next;
+        buffer.insert(sequence, &frame, now).unwrap();
+        for skipped in before..buffer.next {
+            decode(&mut reference, &frames[skipped as usize]);
+            trims += 1;
+        }
+        let expected = decode(&mut reference, &frames[buffer.next as usize]);
+        let output = buffer.pop(now).unwrap().unwrap();
+        assert_eq!(output, expected, "codec history changed at tick {tick}");
+        assert_continuous(&previous, &output);
+        previous = output;
+    }
+    assert_eq!(trims, 2);
+    assert_eq!(buffer.target, buffer.nominal_target);
+}
+
+#[test]
+fn short_deadline_skips_decode_packets_and_conceal_holes_across_wrap() {
+    let start = Instant::now();
+    let initial = u32::MAX - 20;
+    let mut buffer = PeerJitterBuffer::new(initial, start, 1).unwrap();
+    let ready = buffer.ready_at;
+    let mut encoder = encoder().unwrap();
+    let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+    for offset in 0..20 {
+        let frame = encode(&mut encoder, 0.5);
+        buffer
+            .insert(initial.wrapping_add(offset), &frame, start)
+            .unwrap();
+        assert_eq!(
+            buffer.pop(ready).unwrap().unwrap(),
+            decode(&mut reference, &frame)
+        );
+    }
+    let discarded = encode(&mut encoder, 0.5);
+    buffer.insert(u32::MAX, &discarded, ready).unwrap();
+    decode(&mut reference, &discarded);
+    encode(&mut encoder, 0.5); // Sequence 0 is missing.
     decode(&mut reference, &[]);
+    let resumed = encode(&mut encoder, 0.5);
+    buffer.insert(1, &resumed, ready).unwrap();
+    buffer.skip_missed(ready, ready + CHUNK_TIME * 2).unwrap();
+    assert_eq!(buffer.next, 1);
     assert_eq!(
         buffer.pop(ready).unwrap().unwrap(),
-        decode(&mut reference, &next)
+        decode(&mut reference, &resumed)
     );
+}
+
+#[test]
+fn window_sized_and_very_large_skips_reset_codec_in_bounded_work() {
+    for count in [WINDOW, u32::MAX] {
+        let start = Instant::now();
+        let mut buffer = PeerJitterBuffer::new(0, start, 1).unwrap();
+        let ready = buffer.ready_at;
+        let mut encoder = encoder().unwrap();
+        for sequence in 0..20 {
+            let frame = encode(&mut encoder, 0.5);
+            buffer.insert(sequence, &frame, start).unwrap();
+            buffer.pop(ready).unwrap();
+        }
+        let frame = encode(&mut encoder, 0.5);
+        buffer.insert(20, &frame, ready).unwrap();
+        buffer.skip(count).unwrap();
+        assert_eq!(buffer.next, 20_u32.wrapping_add(count));
+        assert_eq!(buffer.last, [0.0; FRAME_SAMPLES]);
+        assert!(buffer.slots.iter().all(Option::is_none));
+        let mut fresh = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+        assert_eq!(buffer.pop(ready).unwrap().unwrap(), decode(&mut fresh, &[]));
+    }
 }
 
 #[test]
