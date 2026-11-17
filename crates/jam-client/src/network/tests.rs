@@ -752,7 +752,8 @@ fn repeated_worker_stalls_preserve_clock_phase_and_nominal_buffering() {
             let now = at + Duration::from_micros(700);
             network.playback(&mut speaker, now).unwrap();
             assert!(network.peers[&2].buffered_ms() <= 10.0);
-            assert!(mixer.rings[1].slots() <= FRAME_SAMPLES);
+            assert!(mixer.rings[1].slots() <= FRAME_SAMPLES * 4);
+            assert_eq!(network.peers[&2].target_chunks(), 3);
             while mixer.rings[1].pop().is_ok() {}
             if sequence >= 4 {
                 assert_eq!(
@@ -761,5 +762,96 @@ fn repeated_worker_stalls_preserve_clock_phase_and_nominal_buffering() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn delayed_tick_delivers_received_frames_before_advancing_playout() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+    let (mut speaker, mut mixer) = crate::mixer::channels();
+    let start = network.started;
+    let mut encoder = codec::encoder().unwrap();
+    let mut reference = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).unwrap();
+    let mut expected = Vec::new();
+    for sequence in 0..8 {
+        let chunk = crate::codec::tests::encode(&mut encoder, 0.5);
+        let mut decoded = [0.0; FRAME_SAMPLES];
+        reference.decode_float(&chunk, &mut decoded, false).unwrap();
+        expected.push(decoded);
+        network.delayed.push(Delayed {
+            due: start + CHUNK_TIME * sequence,
+            peer: 2,
+            sequence,
+            chunk,
+        });
+    }
+    network.playback(&mut speaker, start).unwrap();
+    let ready = start + CHUNK_TIME * 3;
+    network.playback(&mut speaker, ready).unwrap();
+    for sample in expected[0] {
+        assert_eq!(mixer.rings[1].pop().unwrap().value, sample);
+    }
+    // Wake 5 ms late. Three expired/current frames fit, so none should be discarded.
+    let now = ready + CHUNK_TIME * 3;
+    network.playback(&mut speaker, now).unwrap();
+    assert_eq!(mixer.rings[1].slots(), FRAME_SAMPLES * 3);
+    for frame in &expected[1..4] {
+        for &sample in frame {
+            assert_eq!(mixer.rings[1].pop().unwrap().value, sample);
+        }
+    }
+    assert_eq!(network.peers[&2].target_chunks(), 3);
+    assert_eq!(network.peers[&2].buffered_ms(), 7.5);
+    assert_eq!(network.next_playout, Some(now + CHUNK_TIME));
+}
+
+#[test]
+fn low_network_jitter_and_one_to_five_ms_worker_delays_keep_nominal_latency() {
+    for nominal in [2, 3] {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+        network.settings.target_chunks = nominal;
+        let (mut speaker, mut mixer) = crate::mixer::channels();
+        let start = network.started;
+        let mut encoder = codec::encoder().unwrap();
+        // Arrival timestamps remain independent of when the worker wakes.
+        let mut pending = Vec::new();
+        for sequence in 0..4000 {
+            pending.push(Delayed {
+                due: start
+                    + CHUNK_TIME * sequence
+                    + Duration::from_micros(u64::from((sequence * 7919) % 3001)),
+                peer: 2,
+                sequence,
+                chunk: crate::codec::tests::encode(&mut encoder, 0.5),
+            });
+        }
+        pending.sort_unstable_by_key(|packet| std::cmp::Reverse(packet.due));
+        let mut now = start;
+        let mut emitted = 0;
+        for tick in 0..3300 {
+            now += Duration::from_millis(1 + tick % 5);
+            while pending.last().is_some_and(|packet| packet.due <= now) {
+                network.delayed.push(pending.pop().unwrap());
+            }
+            assert!(network.delayed.len() <= 4);
+            network.playback(&mut speaker, now).unwrap();
+            if let Some(peer) = network.peers.get(&2) {
+                assert_eq!(peer.target_chunks(), nominal, "at tick {tick}");
+                assert!(
+                    peer.buffered_ms() <= 10.0,
+                    "at tick {tick}: {} ms",
+                    peer.buffered_ms()
+                );
+            }
+            assert!(mixer.rings[1].slots() <= FRAME_SAMPLES * 4);
+            emitted += mixer.rings[1].slots() / FRAME_SAMPLES;
+            while mixer.rings[1].pop().is_ok() {}
+        }
+        assert!(
+            emitted > 3900,
+            "catch-up should preserve the stream: {emitted}"
+        );
     }
 }

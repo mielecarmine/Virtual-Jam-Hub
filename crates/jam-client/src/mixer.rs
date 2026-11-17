@@ -88,6 +88,14 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
 }
 
 impl RxChannels {
+    /// Whole Opus frames that fit within both the SPSC capacity and the latency budget.
+    pub fn available_chunks(&mut self, id: u8) -> usize {
+        let ring = &mut self.rings[usize::from(id) - 1];
+        let free = ring.slots();
+        let queued = ring.buffer().capacity() - free;
+        free.min(MAX_RX_SAMPLES.saturating_sub(queued)) / FRAME_SAMPLES
+    }
+
     /// IDs are validated by the protocol and mapped directly to fixed slots `0..MAX_PEERS`.
     pub fn push(&mut self, id: u8, chunk: &[f32]) {
         let index = usize::from(id) - 1;
