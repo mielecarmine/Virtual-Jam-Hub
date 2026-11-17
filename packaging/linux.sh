@@ -7,7 +7,7 @@ install -m755 target/release/jam-client "$root/usr/bin/virtual-jam"
 install -m644 LICENSE "$root/usr/share/doc/virtual-jam/copyright"
 cat > "$root/DEBIAN/control" <<CONTROL
 Package: virtual-jam
-Version: ${version/-beta-/~beta-}
+Version: ${version/-/\~}
 Section: sound
 Priority: optional
 Architecture: amd64

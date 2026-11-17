@@ -1,20 +1,27 @@
-Prima beta pubblica di Virtual Jam, preparata da `develop`.
+Pre-release del client Virtual Jam `1.0.1-beta2`, preparata da `develop`.
 
 ## Download e installazione
 
 | Sistema | Installer | Requisiti |
 | --- | --- | --- |
-| Windows | `Virtual-Jam-1.0.0-beta-1-windows-x64-setup.exe` | Windows 10/11 x64; installazione per utente, senza amministratore |
-| Linux | `Virtual-Jam-1.0.0-beta-1-linux-amd64.deb` | Ubuntu 22.04 o successivo / Debian 12 o successivo, amd64, desktop X11/Wayland e OpenGL |
-| macOS Intel | `Virtual-Jam-1.0.0-beta-1-macos-x86_64.pkg` | macOS 11 o successivo |
-| macOS Apple Silicon | `Virtual-Jam-1.0.0-beta-1-macos-arm64.pkg` | macOS 11 o successivo |
+| Windows | `Virtual-Jam-1.0.1-beta2-windows-x64-setup.exe` | Windows 10/11 x64; installazione per utente, senza amministratore |
+| Linux | `Virtual-Jam-1.0.1-beta2-linux-amd64.deb` | Ubuntu 22.04 o successivo / Debian 12 o successivo, amd64, desktop X11/Wayland e OpenGL |
+| macOS Intel | `Virtual-Jam-1.0.1-beta2-macos-x86_64.pkg` | macOS 11 o successivo |
+| macOS Apple Silicon | `Virtual-Jam-1.0.1-beta2-macos-arm64.pkg` | macOS 11 o successivo |
 
-Linux: installare con `sudo apt install ./Virtual-Jam-1.0.0-beta-1-linux-amd64.deb`.
+Linux: installare con `sudo apt install ./Virtual-Jam-1.0.1-beta2-linux-amd64.deb`.
 macOS: aprire il pacchetto e avviare **Virtual Jam** da Applicazioni; consentire l'accesso al microfono.
 Windows: eseguire il setup e avviare **Virtual Jam** dal menu Start.
 `SHA256SUMS.txt` contiene gli hash degli installer.
 
 Gli installer di questa beta non hanno una firma commerciale Windows/Apple né notarizzazione Apple. SmartScreen o Gatekeeper possono richiedere un'autorizzazione esplicita nelle impostazioni di sicurezza. La firma ad hoc del bundle macOS non certifica l'identità dell'autore.
+
+## Novità rispetto a 1.0.0-beta-1
+
+- Latenza di ricezione limitata e recupero del clock di riproduzione per evitare accumuli di ritardo nelle sessioni (JAM-17).
+- Monitoraggio diretto dell'ingresso locale in cuffia, con gain e mute dedicati senza modificare il segnale inviato ai peer (JAM-18).
+- Log di telemetria delle sessioni GUI, abilitati negli installer di pre-release: file `telemetry-*.txt` accanto a `client.toml`, utili per segnalare problemi di audio e rete (JAM-20).
+- Benchmark di rete headless multi-peer disponibile nei sorgenti come esempio `net_bench` per verificare il comportamento sotto carico (JAM-19).
 
 ## Funzionalità
 

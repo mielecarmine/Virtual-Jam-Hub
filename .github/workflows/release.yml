@@ -2,7 +2,7 @@ name: Release installers
 on:
   push:
     branches: ['codex/release-*']
-    tags: ['1.*-alpha-*', '1.*-beta-*', '1.*-rc-*']
+    tags: ['1.*-alpha*', '1.*-beta*', '1.*-rc*']
   workflow_dispatch:
 permissions:
   contents: read
