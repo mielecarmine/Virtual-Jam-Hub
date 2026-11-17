@@ -2,6 +2,7 @@
 set -euo pipefail
 version=${1:?version required}
 arch=${2:?architecture required}
+bundle_version=${version%%-*}
 app='target/package-macos/Virtual Jam.app'
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dist
 install -m755 target/release/jam-client "$app/Contents/MacOS/jam-client"
@@ -14,8 +15,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleName</key><string>Virtual Jam</string>
 <key>CFBundleExecutable</key><string>jam-client</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.0</string>
-<key>CFBundleVersion</key><string>1.0.0</string>
+<key>CFBundleShortVersionString</key><string>${bundle_version}</string>
+<key>CFBundleVersion</key><string>${bundle_version}</string>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Virtual Jam uses audio input to share your instrument and voice with your session.</string>
@@ -28,6 +29,6 @@ codesign --verify --deep --strict "$app"
 # update it in place instead of installing the application in /Applications.
 pkgbuild --analyze --root target/package-macos target/macos-components.plist
 /usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' target/macos-components.plist
-pkgbuild --root target/package-macos --component-plist target/macos-components.plist --install-location /Applications --identifier io.github.mielecarmine.virtual-jam --version 1.0.0 "dist/Virtual-Jam-${version}-macos-${arch}.pkg"
+pkgbuild --root target/package-macos --component-plist target/macos-components.plist --install-location /Applications --identifier io.github.mielecarmine.virtual-jam --version "$bundle_version" "dist/Virtual-Jam-${version}-macos-${arch}.pkg"
 sudo installer -pkg "dist/Virtual-Jam-${version}-macos-${arch}.pkg" -target /
 '/Applications/Virtual Jam.app/Contents/MacOS/jam-client' --help
