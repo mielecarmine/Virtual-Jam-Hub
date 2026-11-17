@@ -2,7 +2,7 @@ name: Release installers
 on:
   push:
     branches: ['codex/release-*']
-    tags: ['1.*-beta-*']
+    tags: ['1.*-alpha-*', '1.*-beta-*', '1.*-rc-*']
   workflow_dispatch:
 permissions:
   contents: read
@@ -58,11 +58,19 @@ jobs:
           VERSION=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "$VERSION"; fi
+          if [[ "${VERSION%%+*}" == *-* ]]; then
+            echo "TELEMETRY_FEATURES=--features jam-client/telemetry-log" >> "$GITHUB_ENV"
+          else
+            echo "TELEMETRY_FEATURES=" >> "$GITHUB_ENV"
+          fi
       - run: cargo fmt --check
       - run: cargo clippy --workspace --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --locked --features jam-client/telemetry-log -- -D warnings
+      - run: cargo test --workspace --locked --features jam-client/telemetry-log
       - name: Release build
-        run: cargo build --release --locked --workspace
+        shell: bash
+        run: cargo build --release --locked --workspace $TELEMETRY_FEATURES
       - name: Preserve verified binaries before packaging
         uses: actions/upload-artifact@v4
         with:

@@ -6,6 +6,13 @@ struct FakeSession {
     fail: bool,
 }
 impl ActiveSession for FakeSession {
+    #[cfg(feature = "telemetry-log")]
+    fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
+        Some(crate::network::Telemetry {
+            rtt_ms: Some(12.0),
+            ..crate::network::Telemetry::default()
+        })
+    }
     fn poll(&mut self) -> io::Result<bool> {
         if self.fail {
             Err(io::Error::other("device unplugged"))
@@ -86,6 +93,8 @@ fn reconnects_releases_sessions_and_persists_selection_on_shutdown() {
         worker.join().unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 4);
         assert_eq!(Preferences::load(path).unwrap(), final_preferences);
+        #[cfg(feature = "telemetry-log")]
+        assert_logs(path, 4);
     });
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
@@ -138,6 +147,112 @@ fn startup_and_runtime_errors_allow_another_connection() {
         drop(commands);
         worker.join().unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 2);
+        #[cfg(feature = "telemetry-log")]
+        assert_logs(path, 1);
     });
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[cfg(feature = "telemetry-log")]
+fn assert_logs(path: &std::path::Path, expected: usize) {
+    let logs: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+        .collect();
+    assert_eq!(logs.len(), expected);
+    for path in logs {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.matches("Summary").count(), 1);
+        assert!(text.contains("\t12.000\t12.000\t12.000\t12.000"));
+    }
+}
+
+#[cfg(feature = "telemetry-log")]
+#[test]
+fn runtime_error_finalizes_log_and_log_open_failure_keeps_session_connected() {
+    struct RuntimeFailure(u32);
+    impl ActiveSession for RuntimeFailure {
+        fn poll(&mut self) -> io::Result<bool> {
+            self.0 += 1;
+            if self.0 == 2 {
+                Err(io::Error::other("runtime failure"))
+            } else {
+                Ok(true)
+            }
+        }
+        fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
+            Some(crate::network::Telemetry {
+                rtt_ms: Some(12.0),
+                ..crate::network::Telemetry::default()
+            })
+        }
+    }
+    let path = crate::setup::tests::temporary_path("telemetry-runtime");
+    let (commands, receiver) = crossbeam_channel::unbounded();
+    let (sender, events) = crossbeam_channel::unbounded();
+    thread::scope(|scope| {
+        let path = &path;
+        let worker = scope.spawn(move || {
+            control_loop(
+                &receiver,
+                &sender,
+                Preferences::default(),
+                path,
+                |_| Ok(RuntimeFailure(0)),
+                |_| Ok(Catalog::default()),
+            );
+        });
+        commands
+            .send(Command::Connect(Preferences::default()))
+            .unwrap();
+        wait_for(
+            &events,
+            |event| matches!(event, Event::Error(error) if error == "runtime failure"),
+        );
+        wait_for(&events, |event| {
+            matches!(event, Event::Phase(Phase::Disconnected))
+        });
+        commands.send(Command::Shutdown(None)).unwrap();
+        worker.join().unwrap();
+    });
+    assert_logs(&path, 1);
+    // A regular file cannot be used as the logger/config parent directory.
+    let blocked = path.join("client.toml");
+    let (commands, receiver) = crossbeam_channel::unbounded();
+    let (sender, events) = crossbeam_channel::unbounded();
+    let drops = Arc::new(AtomicU32::new(0));
+    thread::scope(|scope| {
+        let drops = &drops;
+        let worker = scope.spawn(move || {
+            control_loop(
+                &receiver,
+                &sender,
+                Preferences::default(),
+                &blocked,
+                |_| {
+                    Ok(FakeSession {
+                        drops: Arc::clone(drops),
+                        fail: false,
+                    })
+                },
+                |_| Ok(Catalog::default()),
+            );
+        });
+        commands
+            .send(Command::Connect(Preferences::default()))
+            .unwrap();
+        wait_for(
+            &events,
+            |event| matches!(event, Event::Error(error) if error.starts_with("Telemetry log:")),
+        );
+        wait_for(&events, |event| {
+            matches!(event, Event::Phase(Phase::Connected))
+        });
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        commands.send(Command::Shutdown(None)).unwrap();
+        worker.join().unwrap();
+    });
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

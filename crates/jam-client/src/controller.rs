@@ -91,6 +91,8 @@ impl Controller {
 
 // A session is created and destroyed on its owning thread (CPAL streams can be !Send).
 struct Session {
+    #[cfg(feature = "telemetry-log")]
+    log_preferences: Preferences,
     input: Option<cpal::Stream>,
     output: Option<cpal::Stream>,
     mic: Consumer<f32>,
@@ -110,6 +112,13 @@ impl Session {
                 preferences.output.as_deref(),
             )?;
             let frames = preferences.buffer_frames;
+            #[cfg(feature = "telemetry-log")]
+            let log_preferences = Preferences {
+                host: Some(host.id().name().into()),
+                input: Some(input.name()?),
+                output: Some(output.name()?),
+                ..preferences.clone()
+            };
             let input_config =
                 audio::select_config_for_buffer(input.supported_input_configs()?, frames)
                     .ok_or_else(|| {
@@ -138,6 +147,8 @@ impl Session {
                 Arc::clone(&stats),
             )?;
             let session = Self {
+                #[cfg(feature = "telemetry-log")]
+                log_preferences,
                 input: Some(input),
                 output: Some(output),
                 mic,
@@ -159,6 +170,14 @@ impl Session {
 }
 
 trait ActiveSession {
+    #[cfg(feature = "telemetry-log")]
+    fn log_preferences(&self, requested: &Preferences) -> Preferences {
+        requested.clone()
+    }
+    #[cfg(feature = "telemetry-log")]
+    fn xruns(&self) -> [u32; 2] {
+        [0; 2]
+    }
     fn poll(&mut self) -> io::Result<bool>;
     fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
         None
@@ -169,6 +188,18 @@ trait ActiveSession {
 }
 
 impl ActiveSession for Session {
+    #[cfg(feature = "telemetry-log")]
+    fn log_preferences(&self, _: &Preferences) -> Preferences {
+        self.log_preferences.clone()
+    }
+    #[cfg(feature = "telemetry-log")]
+    fn xruns(&self) -> [u32; 2] {
+        use std::sync::atomic::Ordering;
+        [
+            self.stats.input_overflows.load(Ordering::Relaxed),
+            self.stats.output_underflows.load(Ordering::Relaxed),
+        ]
+    }
     fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
         self.network.take_telemetry()
     }
@@ -202,6 +233,8 @@ impl Drop for Session {
     }
 }
 
+// Keep command handling and phase transitions together so teardown order stays visible.
+#[allow(clippy::too_many_lines)]
 fn control_loop<S: ActiveSession>(
     commands: &Receiver<Command>,
     events: &Sender<Event>,
@@ -223,6 +256,10 @@ fn control_loop<S: ActiveSession>(
     ));
     let mut session: Option<S> = None;
     let mut phase = Phase::Disconnected;
+    #[cfg(feature = "telemetry-log")]
+    let mut log: Option<crate::telemetry_log::SessionLog> = None;
+    #[cfg(feature = "telemetry-log")]
+    let mut remote_peers = 0;
     loop {
         let wait = if session.is_some() {
             Duration::from_micros(250)
@@ -249,6 +286,8 @@ fn control_loop<S: ActiveSession>(
                     }
                 }
                 Command::Disconnect => {
+                    #[cfg(feature = "telemetry-log")]
+                    drop(log.take());
                     drop(session.take());
                     phase = Phase::Disconnected;
                     send(Event::Phase(phase));
@@ -266,6 +305,8 @@ fn control_loop<S: ActiveSession>(
                     }
                 }
                 Command::Shutdown(selected) => {
+                    #[cfg(feature = "telemetry-log")]
+                    drop(log.take());
                     drop(session.take());
                     if let Some(selected) = selected {
                         save(&selected);
@@ -280,9 +321,22 @@ fn control_loop<S: ActiveSession>(
             match active.poll() {
                 Ok(true) if phase != Phase::Connected => {
                     phase = Phase::Connected;
+                    #[cfg(feature = "telemetry-log")]
+                    {
+                        remote_peers = 0;
+                        match crate::telemetry_log::SessionLog::start(
+                            path,
+                            &active.log_preferences(&preferences),
+                        ) {
+                            Ok(writer) => log = Some(writer),
+                            Err(error) => send(Event::Error(format!("Telemetry log: {error}"))),
+                        }
+                    }
                     send(Event::Phase(phase));
                 }
                 Err(error) => {
+                    #[cfg(feature = "telemetry-log")]
+                    drop(log.take());
                     drop(session.take());
                     phase = Phase::Disconnected;
                     send(Event::Error(error.to_string()));
@@ -290,13 +344,42 @@ fn control_loop<S: ActiveSession>(
                 }
                 _ => {}
             }
-            if let Some(metrics) = session.as_mut().and_then(ActiveSession::telemetry_update) {
-                send(Event::Telemetry(metrics));
-            }
-            if let Some(view) = session.as_mut().and_then(ActiveSession::mixer_update) {
-                send(Event::Mixer(view));
+            if let Some(active) = &mut session {
+                publish_updates(
+                    active,
+                    events,
+                    #[cfg(feature = "telemetry-log")]
+                    &mut log,
+                    #[cfg(feature = "telemetry-log")]
+                    &mut remote_peers,
+                );
             }
         }
+    }
+}
+
+fn publish_updates<S: ActiveSession>(
+    active: &mut S,
+    events: &Sender<Event>,
+    #[cfg(feature = "telemetry-log")] log: &mut Option<crate::telemetry_log::SessionLog>,
+    #[cfg(feature = "telemetry-log")] remote_peers: &mut u32,
+) {
+    if let Some(view) = active.mixer_update() {
+        #[cfg(feature = "telemetry-log")]
+        {
+            *remote_peers = u32::try_from(view.peers.len()).unwrap_or(u32::MAX);
+        }
+        let _ = events.send(Event::Mixer(view));
+    }
+    if let Some(metrics) = active.telemetry_update() {
+        #[cfg(feature = "telemetry-log")]
+        if let Some(writer) = log.as_mut() {
+            if let Err(error) = writer.record(*remote_peers, metrics, active.xruns()) {
+                let _ = events.send(Event::Error(format!("Telemetry log: {error}")));
+                drop(log.take());
+            }
+        }
+        let _ = events.send(Event::Telemetry(metrics));
     }
 }
 
