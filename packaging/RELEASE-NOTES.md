@@ -1,22 +1,28 @@
-Pre-release del client Virtual Jam `1.0.1-beta2`, preparata da `develop`.
+Pre-release del client Virtual Jam `1.0.2-beta3`, preparata da `develop`.
 
 ## Download e installazione
 
 | Sistema | Installer | Requisiti |
 | --- | --- | --- |
-| Windows | `Virtual-Jam-1.0.1-beta2-windows-x64-setup.exe` | Windows 10/11 x64; installazione per utente, senza amministratore |
-| Linux | `Virtual-Jam-1.0.1-beta2-linux-amd64.deb` | Ubuntu 22.04 o successivo / Debian 12 o successivo, amd64, desktop X11/Wayland e OpenGL |
-| macOS Intel | `Virtual-Jam-1.0.1-beta2-macos-x86_64.pkg` | macOS 11 o successivo |
-| macOS Apple Silicon | `Virtual-Jam-1.0.1-beta2-macos-arm64.pkg` | macOS 11 o successivo |
+| Windows | `Virtual-Jam-1.0.2-beta3-windows-x64-setup.exe` | Windows 10/11 x64; installazione per utente, senza amministratore |
+| Linux | `Virtual-Jam-1.0.2-beta3-linux-amd64.deb` | Ubuntu 22.04 o successivo / Debian 12 o successivo, amd64, desktop X11/Wayland e OpenGL |
+| macOS Intel | `Virtual-Jam-1.0.2-beta3-macos-x86_64.pkg` | macOS 11 o successivo |
+| macOS Apple Silicon | `Virtual-Jam-1.0.2-beta3-macos-arm64.pkg` | macOS 11 o successivo |
 
-Linux: installare con `sudo apt install ./Virtual-Jam-1.0.1-beta2-linux-amd64.deb`.
+Linux: installare con `sudo apt install ./Virtual-Jam-1.0.2-beta3-linux-amd64.deb`.
 macOS: aprire il pacchetto e avviare **Virtual Jam** da Applicazioni; consentire l'accesso al microfono.
 Windows: eseguire il setup e avviare **Virtual Jam** dal menu Start.
 `SHA256SUMS.txt` contiene gli hash degli installer.
 
 Gli installer di questa beta non hanno una firma commerciale Windows/Apple né notarizzazione Apple. SmartScreen o Gatekeeper possono richiedere un'autorizzazione esplicita nelle impostazioni di sicurezza. La firma ad hoc del bundle macOS non certifica l'identità dell'autore.
 
-## Novità rispetto a 1.0.0-beta-1
+## Novità rispetto a 1.0.1-beta2
+
+- Ridotti gli underflow periodici del mixer in ricezione: le code dei peer vengono precaricate e mantengono una riserva di riproduzione (JAM-21).
+- Preservata la continuità del decoder Opus durante l'adattamento del jitter buffer, evitando salti nella cronologia del codec (JAM-22).
+- Corretta la crescita della latenza del jitter buffer causata dai ritardi di scheduling del client, con gestione dei pacchetti in raffica e dei salti del clock di riproduzione (JAM-23).
+
+## Funzionalità introdotte nelle beta precedenti
 
 - Latenza di ricezione limitata e recupero del clock di riproduzione per evitare accumuli di ritardo nelle sessioni (JAM-17).
 - Monitoraggio diretto dell'ingresso locale in cuffia, con gain e mute dedicati senza modificare il segnale inviato ai peer (JAM-18).
