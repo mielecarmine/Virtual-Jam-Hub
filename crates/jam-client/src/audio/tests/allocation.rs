@@ -78,7 +78,7 @@ fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
 
 #[test]
 fn multichannel_mixer_never_allocates_during_playback_or_peer_reuse() {
-    let (mut rx, mut mixer) = crate::mixer::channels();
+    let (mut rx, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let controls = std::sync::Arc::clone(&mixer.controls);
     let stats = Stats::default();
     let mut output = [0.0; BUFFER_FRAMES * 2];
@@ -115,7 +115,7 @@ fn multichannel_mixer_never_allocates_during_playback_or_peer_reuse() {
 
 #[test]
 fn direct_monitor_capture_and_mix_do_not_allocate_even_when_full_or_muted() {
-    let (rx, mut mixer) = crate::mixer::channels();
+    let (rx, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let mut monitor = mixer.enable_local_monitor();
     let (mut mic, _net) = RingBuffer::new(1);
     let stats = Stats::default();

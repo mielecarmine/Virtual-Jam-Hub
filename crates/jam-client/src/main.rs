@@ -74,7 +74,7 @@ fn run_cli(options: &cli::Options) -> Result<(), Box<dyn Error>> {
     ctrlc::set_handler(move || signal_stop.store(true, Ordering::Relaxed))?;
     let (mic_producer, mut mic_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
     let (mut speaker_producer, speaker_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
-    let (rx, mut mixer) = mixer::channels();
+    let (rx, mut mixer) = mixer::channels(crate::audio::BUFFER_FRAMES);
     let monitor = network_mode.then(|| mixer.enable_local_monitor());
     let input_stream = streams::input(
         &input,

@@ -12,7 +12,7 @@ const MAX_TARGET: usize = 16;
 const MAX_ADAPTIVE_TARGET: usize = 8;
 const LATE_THRESHOLD: u8 = 3;
 const STABLE_WINDOW: Duration = Duration::from_secs(1);
-// One extra slot absorbs a batch after up to 5 ms of worker scheduling delay.
+// Allow three queued chunks beyond the nominal network jitter target.
 const QUEUE_SLACK: usize = 3;
 
 /// Cumulative worker counters; `late_dropped` includes `late_dropped_far` (>= WINDOW).
@@ -43,6 +43,7 @@ pub struct PeerJitterBuffer {
     next: u32,
     pub ready_at: Instant,
     started: bool,
+    pending_playout: u128,
     target: usize,
     nominal_target: usize,
     stable_since: Instant,
@@ -72,6 +73,7 @@ impl PeerJitterBuffer {
             next: sequence,
             ready_at: now + CHUNK_TIME * u32::try_from(target).unwrap_or(3),
             started: false,
+            pending_playout: 0,
             target,
             nominal_target: target,
             stable_since: now,
@@ -127,6 +129,7 @@ impl PeerJitterBuffer {
             self.slots.fill(None);
             self.next = sequence;
             self.started = false;
+            self.pending_playout = 0;
             self.hold = false;
             self.late_count = 0;
             self.last_late = None;
@@ -152,7 +155,12 @@ impl PeerJitterBuffer {
         Ok(())
     }
 
+    #[cfg(test)]
     fn trim_backlog(&mut self) -> opus::Result<()> {
+        self.trim_backlog_with_allowance(0)
+    }
+
+    fn trim_backlog_with_allowance(&mut self, allowance: usize) -> opus::Result<()> {
         // Trim only after the entire receive batch has been inserted and deadlines
         // accounted for; otherwise a scheduling burst can discard playable frames.
         let distance = self
@@ -163,14 +171,14 @@ impl PeerJitterBuffer {
             .filter(|&distance| distance < (1 << 31))
             .max()
             .unwrap_or(0);
-        let budget = u32::try_from(self.target + QUEUE_SLACK).unwrap_or(19);
+        let budget = u32::try_from(self.target + QUEUE_SLACK + allowance).unwrap_or(19);
         if distance < (1 << 31) && distance >= budget {
             self.skip(distance - budget + 1)?;
         }
         Ok(())
     }
 
-    /// Recover elapsed deadlines within downstream capacity; discard only the excess.
+    /// Retain elapsed deadlines under backpressure; trim only actual latency excess.
     pub fn playout_frames(
         &mut self,
         deadline: Instant,
@@ -186,16 +194,33 @@ impl PeerJitterBuffer {
                 .as_nanos()
                 .div_ceil(CHUNK_TIME.as_nanos());
             let due = elapsed.saturating_add(1).saturating_sub(startup);
-            // Even a full queue advances one current frame (push discards it whole).
-            // Never decode an unbounded catch-up burst after a long suspension.
-            let frames = due.min(capacity.clamp(1, 4) as u128);
-            let missed = u32::try_from(due - frames).unwrap_or(u32::MAX);
-            if missed > 0 {
-                self.hold = false;
-                self.skip(missed)?;
+            self.pending_playout = self.pending_playout.saturating_add(due);
+            // Backpressure is not packet loss. Leave both packets and decoder untouched.
+            if capacity == 0 {
+                return Ok(0);
             }
-            self.trim_backlog()?;
-            return Ok(u32::try_from(frames).unwrap_or(4));
+            // Only a suspension beyond the reorder window expires wall-clock deadlines.
+            let expired = self.pending_playout.saturating_sub(u128::from(WINDOW));
+            if expired > 0 {
+                self.hold = false;
+                self.skip(u32::try_from(expired).unwrap_or(u32::MAX))?;
+                self.pending_playout -= expired;
+            }
+            let before = self.next;
+            let deliverable = self
+                .pending_playout
+                .min(capacity as u128)
+                .min(u128::from(WINDOW));
+            self.trim_backlog_with_allowance(usize::try_from(deliverable).unwrap_or(CAPACITY))?;
+            self.pending_playout = self
+                .pending_playout
+                .saturating_sub(u128::from(self.next.wrapping_sub(before)));
+            let frames = self
+                .pending_playout
+                .min(capacity as u128)
+                .min(u128::from(WINDOW));
+            self.pending_playout -= frames;
+            return Ok(u32::try_from(frames).unwrap_or(WINDOW));
         }
         Ok(0)
     }

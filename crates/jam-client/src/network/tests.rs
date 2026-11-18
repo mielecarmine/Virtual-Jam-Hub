@@ -52,7 +52,7 @@ fn join_timeout_is_reported_and_disconnect_sends_leave_after_acceptance() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     let (_, mut mic) = RingBuffer::new(4096);
-    let (mut speaker, _mixer) = crate::mixer::channels();
+    let (mut speaker, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let mut timed_out = Network::connect(server.local_addr().unwrap(), "guitar").unwrap();
     assert!(!timed_out.is_connected());
     let now = timed_out.started + SERVER_TIMEOUT;
@@ -100,7 +100,7 @@ fn retries_join_sends_heartbeat_frames_and_wraps_counters() {
     let mut network = Network::connect(server.local_addr().unwrap(), "guitar").unwrap();
     let destination = network.socket.local_addr().unwrap();
     let (mut input, mut mic) = RingBuffer::new(4096);
-    let (mut speaker, _mixer) = crate::mixer::channels();
+    let (mut speaker, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let start = network.started;
     network.tick(&mut mic, &mut speaker, start).unwrap();
     assert!(matches!(
@@ -191,7 +191,7 @@ fn rejects_wrong_sample_rate_and_ignores_foreign_endpoint() {
     let mut network = Network::connect(server.local_addr().unwrap(), "peer").unwrap();
     let destination = network.socket.local_addr().unwrap();
     let (_, mut mic) = RingBuffer::new(4096);
-    let (mut speaker, _mixer) = crate::mixer::channels();
+    let (mut speaker, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     send_control(
         &foreign,
         destination,
@@ -234,9 +234,9 @@ fn two_clients_exchange_opus_through_real_sfu_without_echo() {
         let mut a = Network::connect(address, "a").unwrap();
         let mut b = Network::connect(address, "b").unwrap();
         let (mut a_input, mut a_mic) = RingBuffer::new(4096);
-        let (mut a_speaker, mut a_mixer) = crate::mixer::channels();
+        let (mut a_speaker, mut a_mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
         let (mut b_input, mut b_mic) = RingBuffer::new(4096);
-        let (mut b_speaker, mut b_mixer) = crate::mixer::channels();
+        let (mut b_speaker, mut b_mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let deadline = Instant::now() + Duration::from_secs(3);
             while a.peer_id.is_none() || b.peer_id.is_none() {
@@ -295,7 +295,7 @@ fn stopped_worker_sends_leave() {
     let mut network = Network::connect(server.local_addr().unwrap(), "peer").unwrap();
     network.peer_id = Some(1);
     let (_, mic) = RingBuffer::new(4096);
-    let (speaker, _mixer) = crate::mixer::channels();
+    let (speaker, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     network.run(mic, speaker, &AtomicBool::new(true)).unwrap();
     assert_eq!(
         ControlMessage::from_bytes(&receive(&server)).unwrap(),
@@ -398,7 +398,7 @@ fn independent_peers_are_paced_together_and_expire_without_unbounded_silence() {
 }
 
 #[test]
-fn full_speaker_discards_whole_frame_and_stall_does_not_burst() {
+fn full_speaker_retains_frames_and_stall_does_not_overfill() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
     let (mut speaker, mut mixer) = crate::mixer::channels_with_capacity(FRAME_SAMPLES);
@@ -411,6 +411,9 @@ fn full_speaker_discards_whole_frame_and_stall_does_not_burst() {
         .playback(&mut speaker, start + CHUNK_TIME * 3)
         .unwrap();
     assert_eq!(output.slots(), 1);
+    assert_eq!(network.peers[&2].buffered_ms(), 2.5);
+    assert_eq!(network.peers[&2].diagnostics.rx_push_dropped, 0);
+    assert_eq!(network.peers[&2].diagnostics.skipped_frames, 0);
     assert_eq!(output.pop().unwrap().value, 0.75);
     let stalled = start + CHUNK_TIME * 30;
     network.playback(&mut speaker, stalled).unwrap();
@@ -472,7 +475,7 @@ fn four_remote_peers_reach_the_hardware_mixer_through_the_real_sfu() {
                 .map(|_| {
                     let network = Network::connect(address, "musician").unwrap();
                     let (input, mic) = RingBuffer::new(4096);
-                    let (rx, mixer) = crate::mixer::channels();
+                    let (rx, mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
                     (network, input, mic, rx, mixer)
                 })
                 .collect();
@@ -512,7 +515,7 @@ fn four_remote_peers_reach_the_hardware_mixer_through_the_real_sfu() {
             let ready = net.peers.values().map(|peer| peer.ready_at).max().unwrap();
             // Prefill the remote SPSC queues before the first hardware callback.
             // The first decoded frame remains at the head; subsequent ticks supply the reserve.
-            for tick in 0..3 {
+            for tick in 0..8 {
                 net.tick(mic, rx, ready + CHUNK_TIME * tick).unwrap();
             }
             let mut output = [0.0_f32; FRAME_SAMPLES * 2];
@@ -584,7 +587,7 @@ fn roster_tracks_silent_peers_and_resets_departed_controls() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut network = Network::connect(server.local_addr().unwrap(), "local").unwrap();
     network.peer_id = Some(1);
-    let (speaker, _) = crate::mixer::channels();
+    let (speaker, _) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let peer = |id, name| jam_protocol::PeerInfo {
         peer_id: id,
         nickname: [name; NICKNAME_CAPACITY],
@@ -622,7 +625,7 @@ fn telemetry_matches_ping_and_publishes_every_half_second() {
     network.peer_id = Some(1);
     let start = network.started;
     let (_, mut mic) = RingBuffer::new(128);
-    let (mut rx, _mixer) = crate::mixer::channels();
+    let (mut rx, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     network
         .tick(&mut mic, &mut rx, start + PING_INTERVAL)
         .unwrap();
@@ -677,7 +680,7 @@ fn telemetry_observes_simulated_loss_jitter_and_actual_buffer_occupancy() {
             target_chunks: 3,
         });
     network.random = 12345;
-    let (mut rx, _mixer) = crate::mixer::channels();
+    let (mut rx, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let start = network.started;
     let mut bytes = packet(2, 0.3);
     for sequence in 0..4000 {
@@ -712,7 +715,7 @@ fn oversized_datagrams_are_dropped_and_valid_handshake_still_succeeds() {
     let mut network = Network::connect(server.local_addr().unwrap(), "peer").unwrap();
     let destination = network.socket.local_addr().unwrap();
     let (_, mut mic) = RingBuffer::new(128);
-    let (mut speaker, _mixer) = crate::mixer::channels();
+    let (mut speaker, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let accepted = ControlMessage::JoinAccepted {
         assigned_peer_id: 1,
         sample_rate: SAMPLE_RATE,
@@ -741,7 +744,7 @@ fn oversized_datagrams_are_dropped_and_valid_handshake_still_succeeds() {
 fn repeated_worker_stalls_preserve_clock_phase_and_nominal_buffering() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
-    let (mut speaker, mut mixer) = crate::mixer::channels();
+    let (mut speaker, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let start = network.started;
     for sequence in 0..400_u32 {
         let at = start + CHUNK_TIME * sequence;
@@ -772,7 +775,7 @@ fn repeated_worker_stalls_preserve_clock_phase_and_nominal_buffering() {
 fn delayed_tick_delivers_received_frames_before_advancing_playout() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
-    let (mut speaker, mut mixer) = crate::mixer::channels();
+    let (mut speaker, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let start = network.started;
     let mut encoder = codec::encoder().unwrap();
     let mut reference = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).unwrap();
@@ -815,7 +818,7 @@ fn low_network_jitter_and_one_to_five_ms_worker_delays_keep_nominal_latency() {
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
         network.settings.target_chunks = nominal;
-        let (mut speaker, mut mixer) = crate::mixer::channels();
+        let (mut speaker, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
         let start = network.started;
         let mut encoder = codec::encoder().unwrap();
         // Arrival timestamps remain independent of when the worker wakes.
@@ -864,7 +867,7 @@ fn diagnostic_totals_survive_peer_removal_and_id_reuse_without_loss() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut network = Network::connect(server.local_addr().unwrap(), "diagnostic").unwrap();
     let start = network.started;
-    let (mut rx, _mixer) = crate::mixer::channels();
+    let (mut rx, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let bytes = packet(2, 0.3);
     let chunk: Encoded = bytes[AUDIO_HEADER_SIZE..].try_into().unwrap();
     let mut peer = PeerJitterBuffer::new(100, start, 1).unwrap();
@@ -872,9 +875,15 @@ fn diagnostic_totals_survive_peer_removal_and_id_reuse_without_loss() {
     peer.pop(start + CHUNK_TIME).unwrap();
     peer.insert(100, &chunk, start + CHUNK_TIME).unwrap();
     peer.insert(0, &chunk, start + CHUNK_TIME).unwrap();
+    // Seed prior counters to test retention independently of queue-overflow behavior.
+    peer.diagnostics.rx_push_dropped = 1;
+    peer.diagnostics.plc_frames = 2;
+    peer.diagnostics.skipped_frames = 1;
     network.peers.insert(2, peer);
     network.arrivals.insert(2, ArrivalStats::new(100, start));
-    assert!(rx.push(2, &[0.0; FRAME_SAMPLES * 4]));
+    while rx.available_chunks(2) > 0 {
+        assert!(rx.push(2, &[0.0; FRAME_SAMPLES]));
+    }
     network.playback(&mut rx, start + CHUNK_TIME * 2).unwrap();
     network.publish_telemetry(start + Duration::from_millis(500));
     let first = network.take_telemetry().unwrap();
@@ -942,4 +951,68 @@ fn interval_peaks_reset_without_repeating_stale_rtt() {
     assert_eq!(metrics.rtt_ms, Some(20.0));
     assert_eq!(metrics.rtt_max_ms, None);
     assert_eq!(metrics.worker_max_gap_ms, 0.0);
+}
+
+#[test]
+fn mixer_stays_ready_through_five_to_fifteen_ms_worker_gaps() {
+    use std::sync::atomic::Ordering;
+    for frames in [64, 128, 256] {
+        for phase in [0, 1, 63, 119] {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut network = Network::connect(server.local_addr().unwrap(), "scheduling").unwrap();
+            let (mut speaker, mut mixer) = crate::mixer::channels(frames);
+            let stats = crate::audio::Stats::default();
+            let start = network.started;
+            let mut encoder = codec::encoder().unwrap();
+            let mut next_callback = phase;
+            let mut next_wake = 0;
+            let mut wake = 0;
+            let mut started = false;
+            let mut output = vec![0.0; frames * 2];
+            for sample in 0..48_000_u32 {
+                let now = start + Duration::from_secs_f64(f64::from(sample) / 48_000.0);
+                if sample % FRAME_SAMPLES as u32 == 0 {
+                    let chunk = crate::codec::tests::encode(&mut encoder, 0.5);
+                    for peer in [2, 3] {
+                        network.delayed.push(Delayed {
+                            due: now,
+                            peer,
+                            sequence: sample / FRAME_SAMPLES as u32,
+                            chunk,
+                        });
+                    }
+                }
+                // Worst equal-time order: hardware runs before the worker refills.
+                if sample as usize == next_callback {
+                    mixer.playback(&mut output, 2, &stats);
+                    if stats.playback_started.load(Ordering::Relaxed) {
+                        if started {
+                            assert_eq!(stats.telemetry().not_ready_samples, 0);
+                        }
+                        stats.not_ready_samples.store(0, Ordering::Relaxed);
+                        started = true;
+                    }
+                    next_callback += frames;
+                }
+                if sample as usize == next_wake {
+                    network.playback(&mut speaker, now).unwrap();
+                    next_wake += [120, 240, 480, 720, 48][wake % 5];
+                    wake += 1;
+                }
+            }
+            assert!(started);
+            assert_eq!(
+                stats.output_underflows.load(Ordering::Relaxed),
+                0,
+                "frames={frames}, phase={phase}"
+            );
+            assert_eq!(stats.telemetry().not_ready_samples, 0);
+            assert_eq!(stats.telemetry().align_dropped_samples, 0);
+            for peer in network.peers.values() {
+                assert_eq!(peer.diagnostics.rx_push_dropped, 0);
+                assert_eq!(peer.diagnostics.skipped_frames, 0);
+                assert_eq!(peer.diagnostics.plc_frames, 0);
+            }
+        }
+    }
 }

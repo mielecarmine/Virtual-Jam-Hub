@@ -354,12 +354,14 @@ interessato; gli altri decoder conservano la propria storia.
 La lista peer e un timeout di 5 secondi eliminano gli stati non più attivi.
 
 Il worker inserisce tutti i pacchetti maturati prima di avanzare il playout.
-Normalmente produce un chunk per scadenza (2,5 ms); dopo un ritardo può recuperarne
-fino a quattro per peer, entro lo spazio libero e il limite di 10 ms del ring SPSC.
-Scarta soltanto le scadenze che eccedono questo budget, rispettando il prefill
-iniziale di ciascun peer e mantenendo la fase del clock di playout.
-Invia ogni peer pronto al suo ring SPSC dedicato; un ring
-pieno scarta soltanto il chunk di quel peer. Il mix avviene nel callback audio
+Normalmente produce un chunk per scadenza (2,5 ms); dopo un ritardo recupera i chunk
+maturati entro lo spazio libero del ring SPSC dedicato, al massimo 64 per chiamata.
+Se non entra un chunk intero, conserva pacchetti e scadenze per il prossimo risveglio,
+senza avanzare il decoder né contare perdite. Il trim limita l'arretrato reale a
+target + 3 chunk, oltre ai chunk consegnabili nella chiamata corrente. Solo una
+sospensione oltre la finestra di riordino (160 ms) fa scadere i tick più vecchi.
+Il prefill resta indipendente per peer e la fase del clock viene conservata.
+Il mix avviene nel callback audio
 come descritto in JAM-11. I callback `cpal` restano senza allocazioni, lock o I/O.
 
 Per provare perdita e jitter in ricezione su uno o entrambi i client:
@@ -383,11 +385,23 @@ interruzioni con questi flag; tale verifica hardware rimane manuale.
 ### 10. Mixer multicanale RT e soft clipping — JAM-11
 
 In modalità UDP, il callback di output legge un array fisso di `MAX_PEERS` ring
-`rtrb` (480 campioni ciascuno, 10 ms a 48 kHz), indicizzati con `peer_id - 1` e allocati prima
-dell'avvio degli stream. Il callback scarta i campioni più vecchi quando la
-coda supera 240 campioni, conservando i 5 ms più recenti; il producer scarta
-i chunk interi che supererebbero il cap di 480 campioni. Il limite riguarda
-il buffering software in ricezione, esclusi dispositivo e rete.
+`rtrb` indicizzati con `peer_id - 1` e allocati prima dell'avvio degli stream.
+Con JAM-24, `mixer::channels(buffer_frames)` dimensiona ogni ring sul blocco hardware:
+la riserva è di 840 campioni (17,5 ms: 15 ms di scheduling più un chunk Opus).
+Il prefill richiede blocco + riserva; la capacità arrotonda questa soglia a chunk
+interi da 120 campioni e aggiunge un chunk. Il callback conserva anche la coda
+che ha completato il prefill, senza tagliarla subito dopo lo startup.
+
+| Blocco hardware | Prefill minimo | Primo prefill a chunk interi | Capacità SPSC |
+| --- | --- | --- | --- |
+| 64 | 904 | 960 | 1080 |
+| 128 | 968 | 1080 | 1200 |
+| 256 | 1096 | 1200 | 1320 |
+
+I valori sono campioni mono. Questa riserva aggiunge latenza software rispetto
+alla precedente riserva di 5 ms; dispositivo e jitter buffer di rete si sommano.
+La capacità limita la latenza anche con callback ferme: il worker trattiene i
+chunk nel jitter buffer invece di estrarli e perderli contro una SPSC piena.
 Il worker conserva un jitter buffer indipendente per peer e limita i campioni decodificati senza sommare i flussi. Il callback somma `sample * gain`
 e applica `tanh(sum)`, duplicando il risultato mono sui canali hardware.
 Con quattro flussi da `0.8`, l'uscita è circa `0.9967` e resta in `[-1, 1]`.
@@ -658,3 +672,28 @@ La pipeline verifica entrambe le configurazioni. I test del logger si eseguono c
 ```bash
 cargo test --workspace --features jam-client/telemetry-log
 ```
+
+### Verifica scheduling e continuità — JAM-24
+
+Durante una sessione desktop attiva su Windows, il controller controlla i comandi
+senza bloccare e attende 250 µs con `std::thread::sleep`. Su Windows 10 1803+
+Rust usa un waitable timer ad alta risoluzione, evitando il timeout di canale
+basato sul tick di sistema. A sessione inattiva rimane l'attesa bloccante da 50 ms.
+Riferimento: [implementazione Rust Windows](https://github.com/rust-lang/rust/blob/1.85.0/library/std/src/sys/pal/windows/thread.rs).
+Il sistema operativo può comunque ritardare un thread sotto carico; le simulazioni
+coprono gap ripetuti da 5 a 15 ms, blocchi da 64/128/256 frame e peer indipendenti,
+verificando assenza di underflow, silenzio successivo allo startup e scarti interni.
+
+La verifica hardware richiede due postazioni Windows ASIO e macOS CoreAudio:
+
+1. Avviare la build con `telemetry-log` su entrambe e connettersi alla stessa stanza.
+2. Ripetere una sessione con audio continuo per ogni buffer: 64, 128 e 256 frame.
+3. Su Windows passare dalla GUI in primo piano a un'altra finestra e poi minimizzare.
+4. Confrontare i log dopo il prefill e fuori dalle riconnessioni: nessun incremento
+   di `output_underflows`, `not_ready_samples` o `rx_push_dropped`;
+   `output_callbacks` continua a crescere anche a 256 frame. Controllare
+   `worker_max_gap_ms` per escludere una cadenza sistematica da 15,625 ms.
+5. Verificare all'ascolto la continuità e annotare eventuali scarti di allineamento,
+   frame saltati e picchi di scheduling/rete insieme ai log di entrambe le postazioni.
+
+Questa prova non è sostituita dai test su clock simulato o da una sessione localhost.

@@ -250,6 +250,8 @@ impl Network {
             .unwrap_or(CHUNK_TIME);
         *next = now + remaining;
         for (&id, peer) in &mut self.peers {
+            // The sole consumer can only free slots while this batch is decoded.
+            // Reserving whole chunks here prevents pop() from losing decoded audio.
             let frames = peer
                 .playout_frames(deadline, now, speaker.available_chunks(id))
                 .map_err(io::Error::other)?;

@@ -133,7 +133,7 @@ impl Session {
                     })?;
             let stats = Arc::new(Stats::default());
             let (producer, mic) = RingBuffer::new(audio::RING_CAPACITY);
-            let (rx, mut mixer) = mixer::channels();
+            let (rx, mut mixer) = mixer::channels(frames as usize);
             let monitor = mixer.enable_local_monitor();
             let input = streams::input(
                 &input,
@@ -290,7 +290,7 @@ fn control_loop<S: ActiveSession>(
         } else {
             Duration::from_millis(50)
         };
-        match commands.recv_timeout(wait) {
+        match receive_command(commands, wait, session.is_some()) {
             Ok(command) => match command {
                 Command::Connect(selected) => {
                     if session.is_none() {
@@ -410,3 +410,34 @@ fn publish_updates<S: ActiveSession>(
 
 #[cfg(test)]
 mod tests;
+
+// Rust's Windows sleep uses a high-resolution waitable timer (Windows 10 1803+).
+// A channel timeout uses WaitOnAddress instead and can round up to the 15.625 ms tick.
+fn receive_command(
+    commands: &Receiver<Command>,
+    wait: Duration,
+    active: bool,
+) -> Result<Command, crossbeam_channel::RecvTimeoutError> {
+    #[cfg(target_os = "windows")]
+    if active {
+        return match commands.try_recv() {
+            Ok(command) => Ok(command),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                thread::sleep(wait);
+                commands.try_recv().map_err(|error| match error {
+                    crossbeam_channel::TryRecvError::Disconnected => {
+                        crossbeam_channel::RecvTimeoutError::Disconnected
+                    }
+                    crossbeam_channel::TryRecvError::Empty => {
+                        crossbeam_channel::RecvTimeoutError::Timeout
+                    }
+                })
+            }
+        };
+    }
+    let _ = active;
+    commands.recv_timeout(wait)
+}

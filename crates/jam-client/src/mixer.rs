@@ -10,10 +10,12 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{audio::Stats, codec::FRAME_SAMPLES};
 
-// At 48 kHz: at most 10 ms queued, with a 5 ms reserve AFTER the current callback.
-// The reserve covers one 120-sample production interval plus up to 1.5 ms worker jitter.
-const MAX_RX_SAMPLES: usize = FRAME_SAMPLES * 4;
-const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 2;
+// 15 ms scheduling reserve plus one production interval (2.5 ms) at 48 kHz.
+const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 7;
+
+fn queue_capacity(frames: usize) -> usize {
+    (frames + RX_TARGET_SAMPLES).div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES + FRAME_SAMPLES
+}
 
 pub struct Controls {
     pub peak: AtomicU32,
@@ -58,8 +60,8 @@ pub struct Mixer {
     ready: [bool; MAX_PEERS],
 }
 
-pub fn channels() -> (RxChannels, Mixer) {
-    channels_with_capacity(MAX_RX_SAMPLES)
+pub fn channels(frames: usize) -> (RxChannels, Mixer) {
+    channels_with_capacity(queue_capacity(frames))
 }
 
 pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
@@ -92,8 +94,7 @@ impl RxChannels {
     pub fn available_chunks(&mut self, id: u8) -> usize {
         let ring = &mut self.rings[usize::from(id) - 1];
         let free = ring.slots();
-        let queued = ring.buffer().capacity() - free;
-        free.min(MAX_RX_SAMPLES.saturating_sub(queued)) / FRAME_SAMPLES
+        free / FRAME_SAMPLES
     }
 
     /// IDs are validated by the protocol and mapped directly to fixed slots `0..MAX_PEERS`.
@@ -109,8 +110,7 @@ impl RxChannels {
         }
         let ring = &mut self.rings[index];
         let free = ring.slots();
-        let queued = ring.buffer().capacity() - free;
-        if free >= chunk.len() && queued + chunk.len() <= MAX_RX_SAMPLES {
+        if free >= chunk.len() {
             for &value in chunk {
                 let _ = ring.push(QueuedSample { value, epoch });
             }
@@ -144,7 +144,9 @@ impl Mixer {
     fn align(&mut self, frames: usize, stats: &Stats) {
         // Only the consumer discards audio. Snapshot each queue so work stays bounded.
         // Keep the callback's demand AND the reserve, rather than consuming the reserve.
-        let target = frames.saturating_add(RX_TARGET_SAMPLES);
+        let prefill = frames.saturating_add(RX_TARGET_SAMPLES);
+        // Chunk quantization must never discard the tail that completed startup.
+        let target = prefill.div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES + FRAME_SAMPLES;
         for (index, ring) in self.rings.iter_mut().enumerate() {
             let epoch = self.controls[index].epoch.load(Ordering::Relaxed);
             if self.epochs[index] != epoch {
@@ -170,8 +172,8 @@ impl Mixer {
                     stats.align_dropped_samples.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            // A hardware block larger than the ring budget must still be able to start.
-            let prefill = target.min(ring.buffer().capacity()).min(MAX_RX_SAMPLES);
+            // Drivers may deliver a larger block than requested; keep startup reachable.
+            let prefill = prefill.min(ring.buffer().capacity());
             if epoch % 2 != 0 && queued >= prefill {
                 self.ready[index] = true;
             }

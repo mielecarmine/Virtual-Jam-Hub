@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn local_monitor_controls_and_solos_never_change_transmitted_samples() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let mut monitor = mixer.enable_local_monitor();
     let (mut mic, mut net) = RingBuffer::new(64);
     let stats = Stats::default();
@@ -41,7 +41,7 @@ fn local_monitor_controls_and_solos_never_change_transmitted_samples() {
 
 #[test]
 fn local_monitor_starts_without_peers_or_prefill_and_silences_underflow() {
-    let (_rx, mut mixer) = channels();
+    let (_rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let mut monitor = mixer.enable_local_monitor();
     let (mut mic, _net) = RingBuffer::new(1);
     let stats = Stats::default();
@@ -75,7 +75,7 @@ fn local_monitor_starts_without_peers_or_prefill_and_silences_underflow() {
 #[test]
 fn delayed_local_output_keeps_only_one_callback_and_rejects_overflowed_old_audio() {
     for frames in [64, 128, 256] {
-        let (_rx, mut mixer) = channels();
+        let (_rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
         let mut monitor = mixer.enable_local_monitor();
         let (mut mic, _net) = RingBuffer::new(1);
         let stats = Stats::default();
@@ -130,7 +130,7 @@ fn delayed_local_output_keeps_only_one_callback_and_rejects_overflowed_old_audio
 
 #[test]
 fn four_full_scale_peers_are_soft_clipped_and_duplicated_to_stereo() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
     for id in 1..=4 {
         rx.push(id, &[0.8; RX_TARGET_SAMPLES + 128]);
@@ -153,7 +153,7 @@ fn four_full_scale_peers_are_soft_clipped_and_duplicated_to_stereo() {
 
 #[test]
 fn atomic_gain_mute_and_solo_take_effect_on_already_queued_audio() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let controls = Arc::clone(&mixer.controls);
     for id in 1..=2 {
         rx.push(id, &[0.5; RX_TARGET_SAMPLES + 16]);
@@ -185,12 +185,12 @@ fn atomic_gain_mute_and_solo_take_effect_on_already_queued_audio() {
 
 #[test]
 fn muted_audio_is_consumed_and_peer_reuse_discards_queued_old_samples() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
     rx.push(8, &[0.8; RX_TARGET_SAMPLES + 128]);
     rx.controls[7].mute.store(true, Ordering::Relaxed);
     let mut out = [1.0; 64];
-    for _ in 0..5 {
+    for _ in 0..20 {
         mixer.playback(&mut out, 1, &stats);
     }
     assert_eq!(out, [0.0; 64]);
@@ -198,7 +198,7 @@ fn muted_audio_is_consumed_and_peer_reuse_discards_queued_old_samples() {
     rx.push(8, &[-0.25; RX_TARGET_SAMPLES + 64]);
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [(-0.25_f32).tanh(); 64]);
-    for _ in 0..5 {
+    for _ in 0..20 {
         mixer.playback(&mut out, 1, &stats);
     }
     assert_eq!(out, [0.0; 64]);
@@ -209,7 +209,7 @@ fn muted_audio_is_consumed_and_peer_reuse_discards_queued_old_samples() {
 
 #[test]
 fn full_peer_queue_does_not_block_another_and_invalid_output_is_silent() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
     rx.push(1, &[0.8; RX_TARGET_SAMPLES + 128]);
     rx.push(1, &[-0.8; 128]);
@@ -228,7 +228,7 @@ fn soft_clip_is_continuous_monotonic_and_bounded_across_the_threshold() {
     let stats = Stats::default();
     let mut previous = -1.0;
     for step in -400_i16..=400 {
-        let (mut rx, mut mixer) = channels();
+        let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
         let sample = f32::from(step) / 400.0;
         for id in 1..=4 {
             rx.push(id, &[sample; RX_TARGET_SAMPLES + 1]);
@@ -244,7 +244,7 @@ fn soft_clip_is_continuous_monotonic_and_bounded_across_the_threshold() {
 
 #[test]
 fn peer_peaks_are_independent_pre_fader_and_reset_on_removal() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
     rx.push(1, &[-0.8, 0.2]);
     rx.push(1, &[0.0; RX_TARGET_SAMPLES]);
@@ -270,120 +270,117 @@ fn peer_peaks_are_independent_pre_fader_and_reset_on_removal() {
 }
 
 #[test]
-fn receive_queue_is_capped_and_callback_discards_oldest_samples() {
-    let (mut rx, mut mixer) = channels();
-    let stats = Stats::default();
-    rx.push(1, &[0.8; RX_TARGET_SAMPLES]);
-    rx.push(1, &[-0.5; RX_TARGET_SAMPLES]);
-    rx.push(1, &[0.1; FRAME_SAMPLES]);
-    assert_eq!(mixer.rings[0].slots(), MAX_RX_SAMPLES);
-    rx.push(2, &[0.25; RX_TARGET_SAMPLES + FRAME_SAMPLES]);
-    let mut out = [0.0; FRAME_SAMPLES];
-    mixer.playback(&mut out, 1, &stats);
-    assert!(out.iter().all(|v| (*v - (1.05_f32).tanh()).abs() < 1e-6));
-    assert_eq!(mixer.rings[0].slots(), RX_TARGET_SAMPLES);
-    assert_eq!(mixer.rings[1].slots(), RX_TARGET_SAMPLES);
+fn whole_chunks_reach_prefill_without_alignment_loss() {
+    for frames in [64, 128, 256] {
+        let (mut rx, mut mixer) = channels(frames);
+        let stats = Stats::default();
+        let chunks = (frames + RX_TARGET_SAMPLES).div_ceil(FRAME_SAMPLES);
+        for _ in 0..chunks {
+            assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+        }
+        let queued = mixer.rings[0].slots();
+        mixer.playback(&mut vec![0.0; frames], 1, &stats);
+        assert!(mixer.ready[0]);
+        assert_eq!(mixer.rings[0].slots(), queued - frames);
+        assert_eq!(stats.telemetry().align_dropped_samples, 0);
+        assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 0);
+        assert!(rx.rings[0].buffer().capacity() >= frames + RX_TARGET_SAMPLES + FRAME_SAMPLES);
+    }
 }
 
 #[test]
 fn remote_prefill_is_per_peer_and_restarts_after_starvation_or_reuse() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(128);
     let stats = Stats::default();
     let mut out = [0.0; 128];
-    rx.push(1, &[0.5; FRAME_SAMPLES]);
+    assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+    assert!(rx.push(2, &[0.25; 1080]));
     mixer.playback(&mut out, 1, &stats);
-    assert_eq!(out, [0.0; 128]);
-    assert!(!stats.playback_started.load(Ordering::Relaxed));
-    assert_eq!(mixer.rings[0].slots(), FRAME_SAMPLES);
-    rx.push(2, &[0.25; MAX_RX_SAMPLES]);
-    mixer.playback(&mut out, 1, &stats);
+    assert!(!mixer.ready[0]);
+    assert!(mixer.ready[1]);
     assert_eq!(out, [0.25_f32.tanh(); 128]);
-    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 0);
     rx.remove(2);
-    for _ in 0..3 {
-        rx.push(1, &[0.5; FRAME_SAMPLES]);
-    }
+    assert!(rx.push(1, &[0.5; 960]));
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [0.5_f32.tanh(); 128]);
-    for _ in 0..2 {
+    for _ in 0..8 {
         mixer.playback(&mut out, 1, &stats);
     }
-    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 16);
-    rx.push(1, &[0.5; FRAME_SAMPLES]);
+    assert!(!mixer.ready[0]);
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 72);
+    assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [0.0; 128]);
-    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 16);
     rx.remove(1);
-    rx.push(1, &[-0.5; FRAME_SAMPLES]);
     mixer.playback(&mut out, 1, &stats);
-    assert_eq!(out, [0.0; 128]);
-    assert_eq!(mixer.rings[0].slots(), FRAME_SAMPLES);
-    for _ in 0..3 {
-        rx.push(1, &[-0.5; FRAME_SAMPLES]);
-    }
+    assert!(rx.push(1, &[-0.5; 1080]));
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [(-0.5_f32).tanh(); 128]);
 }
 
 #[test]
 fn opus_pushes_and_hardware_callbacks_do_not_underflow_with_worker_jitter() {
-    // Time is measured in 48 kHz sample periods: 72 samples = 1.5 ms.
-    // Sweep all relative phases across a full 120-sample producer period.
-    for frames in [64, 128] {
+    for frames in [64, 128, 256] {
         for phase in 0..FRAME_SAMPLES {
-            let (mut rx, mut mixer) = channels();
+            let (mut rx, mut mixer) = channels(frames);
             let stats = Stats::default();
             let mut out = vec![0.0; frames * 2];
             let mut next_callback = phase;
-            let mut next_push = 0;
-            let mut tick = 0;
+            let mut next_wake = 0;
+            let mut produced = 0;
+            let mut wake = 0;
+            let mut started = false;
             for now in 0..48_000 {
-                // Deliberately process equal-time callbacks before the worker.
                 if now == next_callback {
                     mixer.playback(&mut out, 2, &stats);
                     if stats.playback_started.load(Ordering::Relaxed) {
+                        if started {
+                            assert_eq!(stats.telemetry().not_ready_samples, 0);
+                        }
+                        stats.not_ready_samples.store(0, Ordering::Relaxed);
+                        started = true;
+                        assert!(mixer.ready[0]);
                         assert!(out.iter().all(|&v| v == 0.5_f32.tanh()));
                     }
                     next_callback += frames;
                 }
-                if now == next_push {
-                    rx.push(1, &[0.5; FRAME_SAMPLES]);
-                    tick += 1;
-                    // Alternate punctual wakes and 1/1.5 ms delays without clock drift.
-                    let delay = [0, 48, 0, 72, 24, 0, 72][tick % 7];
-                    next_push = tick * FRAME_SAMPLES + delay;
+                if now == next_wake {
+                    while produced <= now && rx.available_chunks(1) > 0 {
+                        assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+                        produced += FRAME_SAMPLES;
+                    }
+                    next_wake += [120, 240, 480, 720, 48][wake % 5];
+                    wake += 1;
                 }
             }
-            assert!(stats.playback_started.load(Ordering::Relaxed));
+            assert!(started);
             assert_eq!(
                 stats.output_underflows.load(Ordering::Relaxed),
                 0,
                 "frames={frames}, phase={phase}"
             );
-            assert!(mixer.rings[0].slots() <= MAX_RX_SAMPLES);
+            assert_eq!(stats.telemetry().align_dropped_samples, 0);
         }
     }
 }
 
 #[test]
 fn diagnostics_separate_active_prefill_silence_underflow_and_alignment_drops() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(128);
     let stats = Stats::default();
-    let mut output = [0.0; 128 * 2];
+    let mut output = [0.0; 256];
     mixer.playback(&mut output, 2, &stats);
     assert_eq!(stats.telemetry().not_ready_samples, 0);
     assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
     mixer.playback(&mut output, 2, &stats);
     assert_eq!(stats.telemetry().not_ready_samples, 128);
-    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 0);
-    assert!(rx.push(1, &[0.5; FRAME_SAMPLES * 3]));
-    assert!(!rx.push(1, &[0.5; FRAME_SAMPLES]));
+    assert!(rx.push(1, &[0.5; 960]));
     mixer.playback(&mut output, 2, &stats);
-    assert_eq!(stats.telemetry().align_dropped_samples, 112);
-    assert_eq!(stats.telemetry().not_ready_samples, 128);
-    mixer.playback(&mut output, 2, &stats);
-    mixer.playback(&mut output, 2, &stats);
-    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 16);
+    assert_eq!(stats.telemetry().align_dropped_samples, 0);
+    for _ in 0..8 {
+        mixer.playback(&mut output, 2, &stats);
+    }
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 72);
     mixer.playback(&mut output, 2, &stats);
     assert_eq!(stats.telemetry().not_ready_samples, 256);
     let callbacks = stats.telemetry().output_callbacks;
@@ -396,7 +393,7 @@ fn diagnostics_separate_active_prefill_silence_underflow_and_alignment_drops() {
 
 #[test]
 fn stale_epoch_alignment_drops_are_counted() {
-    let (mut rx, mut mixer) = channels();
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
     assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
     rx.remove(1);
