@@ -352,6 +352,18 @@ I piccoli riallineamenti fanno avanzare il decoder senza azzerarne la storia.
 Una grande discontinuità di sequenza reinizializza coda e decoder del solo peer
 interessato; gli altri decoder conservano la propria storia.
 La lista peer e un timeout di 5 secondi eliminano gli stati non più attivi.
+Con JAM-25 ogni pacchetto audio valido aggiorna l'attività del peer, compresi
+duplicati e pacchetti tardivi: il timeout misura il silenzio di rete.
+Se il buffer è vuoto, 8 sequenze consecutive tardive riancorano il playout
+all'ultimo pacchetto ricevuto e ricostruiscono il margine target, anche al limite
+adattivo di 20 ms. Per target manuali superiori a 13 chunk la soglia scende fino
+a 5 pacchetti, così rilevamento e prefill restano entro 50 ms con arrivi regolari.
+Il riaggancio ammette al massimo 400 frame di ritardo (1 secondo); oltre questa
+soglia l'audio viene scartato perché troppo vecchio per una sessione musicale.
+Il decoder conserva la storia per salti inferiori a 64 frame e viene resettato
+da 64 frame in poi. Alla discesa dello spike il trim rilascia il backlog.
+I test su clock simulato coprono scalini di 50, 200 e 600 ms per 7 secondi,
+recupero entro 50 ms, ritorno al target e conservazione delle statistiche peer.
 
 Il worker inserisce tutti i pacchetti maturati prima di avanzare il playout.
 Normalmente produce un chunk per scadenza (2,5 ms); dopo un ritardo recupera i chunk
