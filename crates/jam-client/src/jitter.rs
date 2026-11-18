@@ -15,7 +15,30 @@ const STABLE_WINDOW: Duration = Duration::from_secs(1);
 // One extra slot absorbs a batch after up to 5 ms of worker scheduling delay.
 const QUEUE_SLACK: usize = 3;
 
+/// Cumulative worker counters; `late_dropped` includes `late_dropped_far` (>= WINDOW).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Diagnostics {
+    pub late_dropped: u32,
+    pub late_dropped_far: u32,
+    pub plc_frames: u32,
+    pub skipped_frames: u32,
+    pub rx_push_dropped: u32,
+    pub resyncs: u32,
+}
+
+impl Diagnostics {
+    pub fn accumulate(&mut self, other: Self) {
+        self.late_dropped = self.late_dropped.saturating_add(other.late_dropped);
+        self.late_dropped_far = self.late_dropped_far.saturating_add(other.late_dropped_far);
+        self.plc_frames = self.plc_frames.saturating_add(other.plc_frames);
+        self.skipped_frames = self.skipped_frames.saturating_add(other.skipped_frames);
+        self.rx_push_dropped = self.rx_push_dropped.saturating_add(other.rx_push_dropped);
+        self.resyncs = self.resyncs.saturating_add(other.resyncs);
+    }
+}
+
 pub struct PeerJitterBuffer {
+    pub diagnostics: Diagnostics,
     slots: Box<[Option<(u32, Encoded)>]>,
     next: u32,
     pub ready_at: Instant,
@@ -44,6 +67,7 @@ impl PeerJitterBuffer {
     pub fn new(sequence: u32, now: Instant, target: usize) -> opus::Result<Self> {
         let target = target.clamp(1, MAX_TARGET);
         Ok(Self {
+            diagnostics: Diagnostics::default(),
             slots: vec![None; CAPACITY].into_boxed_slice(),
             next: sequence,
             ready_at: now + CHUNK_TIME * u32::try_from(target).unwrap_or(3),
@@ -66,7 +90,13 @@ impl PeerJitterBuffer {
             // Before startup, allow an earlier frame within the bounded reorder window.
             if !self.started && self.next.wrapping_sub(sequence) < WINDOW {
                 self.next = sequence;
+                self.diagnostics.resyncs = self.diagnostics.resyncs.saturating_add(1);
             } else {
+                self.diagnostics.late_dropped = self.diagnostics.late_dropped.saturating_add(1);
+                if self.next.wrapping_sub(sequence) >= WINDOW {
+                    self.diagnostics.late_dropped_far =
+                        self.diagnostics.late_dropped_far.saturating_add(1);
+                }
                 // Ignore duplicates/replays and require repeated recent lateness, rather
                 // than inflating headroom for every isolated late packet in a batch.
                 if self.next.wrapping_sub(sequence) < WINDOW
@@ -93,6 +123,7 @@ impl PeerJitterBuffer {
             }
         } else if distance >= WINDOW {
             // A large discontinuity restarts this peer only, without unbounded buffering.
+            self.diagnostics.resyncs = self.diagnostics.resyncs.saturating_add(1);
             self.slots.fill(None);
             self.next = sequence;
             self.started = false;
@@ -173,6 +204,7 @@ impl PeerJitterBuffer {
         if count == 0 {
             return Ok(());
         }
+        self.diagnostics.skipped_frames = self.diagnostics.skipped_frames.saturating_add(count);
         // Intentional trims and scheduling skips are not evidence of network lateness.
         self.last_late = Some(self.next.wrapping_add(count).wrapping_sub(1));
         self.late_count = 0;
@@ -185,6 +217,7 @@ impl PeerJitterBuffer {
             }
             return Ok(());
         }
+        self.diagnostics.resyncs = self.diagnostics.resyncs.saturating_add(1);
         self.next = self.next.wrapping_add(count);
         self.slots.fill(None);
         // Only a discontinuity outside the reorder window discards codec history.
@@ -200,6 +233,7 @@ impl PeerJitterBuffer {
         if self.hold {
             self.hold = false;
             // Extend playout using native PLC, leaving the queued sequence untouched.
+            self.diagnostics.plc_frames = self.diagnostics.plc_frames.saturating_add(1);
             self.decoder.decode_float(&[], &mut self.last, false)?;
             self.sanitize_last();
         } else {
@@ -217,6 +251,9 @@ impl PeerJitterBuffer {
         };
         self.next = self.next.wrapping_add(1);
         // Decode only after reordering. An empty input invokes Opus PLC; CELT has no FEC.
+        if frame.is_none() {
+            self.diagnostics.plc_frames = self.diagnostics.plc_frames.saturating_add(1);
+        }
         let input = frame.as_ref().map_or(&[][..], |bytes| &bytes[..]);
         if self
             .decoder
@@ -224,6 +261,7 @@ impl PeerJitterBuffer {
             .is_err()
         {
             // Corrupt compressed data is a lost frame, never fatal to the room.
+            self.diagnostics.plc_frames = self.diagnostics.plc_frames.saturating_add(1);
             self.decoder.decode_float(&[], &mut self.last, false)?;
         }
         self.sanitize_last();

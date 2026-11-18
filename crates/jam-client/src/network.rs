@@ -56,6 +56,10 @@ pub struct Network {
     arrivals: BTreeMap<u8, ArrivalStats>,
     telemetry: Option<Telemetry>,
     last_telemetry: Instant,
+    retired_diagnostics: crate::jitter::Diagnostics,
+    last_tick: Option<Instant>,
+    worker_max_gap_ms: f64,
+    rtt_max_ms: Option<f64>,
     rtt: Option<(f64, Instant)>,
     pending_ping: Option<(u64, Instant)>,
     roster: Vec<jam_protocol::PeerInfo>,
@@ -96,6 +100,10 @@ impl Network {
             arrivals: BTreeMap::new(),
             telemetry: None,
             last_telemetry: now,
+            retired_diagnostics: crate::jitter::Diagnostics::default(),
+            last_tick: None,
+            worker_max_gap_ms: 0.0,
+            rtt_max_ms: None,
             rtt: None,
             pending_ping: None,
             roster: Vec::new(),
@@ -136,9 +144,10 @@ impl Network {
             self.roster = remote;
             self.roster_changed = true;
         }
-        self.peers.retain(|id, _| {
+        self.peers.retain(|id, peer| {
             let keep = peers.iter().any(|p| p.peer_id == *id);
             if !keep {
+                self.retired_diagnostics.accumulate(peer.diagnostics);
                 speaker.remove(*id);
             }
             keep
@@ -217,6 +226,7 @@ impl Network {
         self.peers.retain(|id, peer| {
             let keep = now.duration_since(peer.last_received) < SERVER_TIMEOUT;
             if !keep {
+                self.retired_diagnostics.accumulate(peer.diagnostics);
                 speaker.remove(*id);
             }
             keep
@@ -245,7 +255,10 @@ impl Network {
                 .map_err(io::Error::other)?;
             for _ in 0..frames {
                 if let Some(chunk) = peer.pop(now).map_err(io::Error::other)? {
-                    speaker.push(id, &chunk);
+                    if !speaker.push(id, &chunk) {
+                        peer.diagnostics.rx_push_dropped =
+                            peer.diagnostics.rx_push_dropped.saturating_add(1);
+                    }
                 }
             }
         }
@@ -274,12 +287,32 @@ impl Network {
         self.send(&packet[..length])
     }
 
+    fn observe_tick(&mut self, now: Instant) {
+        if let Some(last) = self.last_tick.replace(now) {
+            self.worker_max_gap_ms = self
+                .worker_max_gap_ms
+                .max(now.saturating_duration_since(last).as_secs_f64() * 1000.0);
+        }
+    }
+
+    fn pong(&mut self, stamp: u64, now: Instant) {
+        if let Some((pending, sent)) = self.pending_ping {
+            if pending == stamp {
+                let rtt = now.duration_since(sent).as_secs_f64() * 1000.0;
+                self.rtt = Some((rtt, now));
+                self.rtt_max_ms = Some(self.rtt_max_ms.map_or(rtt, |peak| peak.max(rtt)));
+                self.pending_ping = None;
+            }
+        }
+    }
+
     pub(crate) fn tick(
         &mut self,
         mic: &mut Consumer<f32>,
         speaker: &mut RxChannels,
         now: Instant,
     ) -> io::Result<()> {
+        self.observe_tick(now);
         if self.peer_id.is_none()
             && self
                 .last_join
@@ -334,13 +367,7 @@ impl Network {
                         client_timestamp_us,
                         ..
                     } if self.peer_id.is_some() => {
-                        if let Some((stamp, sent)) = self.pending_ping {
-                            if stamp == client_timestamp_us {
-                                self.rtt =
-                                    Some((now.duration_since(sent).as_secs_f64() * 1000.0, now));
-                                self.pending_ping = None;
-                            }
-                        }
+                        self.pong(client_timestamp_us, now);
                         self.last_server = now;
                     }
                     _ => {}
@@ -395,7 +422,15 @@ impl Network {
         self.last_telemetry = now;
         let expected: f64 = self.arrivals.values().map(|s| f64::from(s.expected)).sum();
         let lost: f64 = self.arrivals.values().map(|s| f64::from(s.lost)).sum();
+        let mut diagnostics = self.retired_diagnostics;
+        for peer in self.peers.values() {
+            diagnostics.accumulate(peer.diagnostics);
+        }
         self.telemetry = Some(Telemetry {
+            diagnostics,
+            audio: crate::audio::AudioTelemetry::default(),
+            worker_max_gap_ms: std::mem::take(&mut self.worker_max_gap_ms),
+            rtt_max_ms: self.rtt_max_ms.take(),
             rtt_ms: self
                 .rtt
                 .filter(|(_, at)| now.duration_since(*at) < SERVER_TIMEOUT)

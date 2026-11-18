@@ -476,3 +476,53 @@ fn intentionally_skipped_frames_do_not_count_as_network_lateness() {
     assert_eq!(buffer.late_count, 0);
     assert!(!buffer.hold);
 }
+
+#[test]
+fn diagnostics_count_late_ranges_plc_skips_and_reanchors() {
+    let now = Instant::now();
+    let ready = now + CHUNK_TIME * 3;
+    let chunk = encode(&mut encoder().unwrap(), 0.5);
+    let mut peer = PeerJitterBuffer::new(100, now, 3).unwrap();
+    peer.insert(100, &chunk, now).unwrap();
+    peer.pop(ready).unwrap();
+    peer.insert(100, &chunk, ready).unwrap();
+    peer.insert(101 - WINDOW, &chunk, ready).unwrap();
+    assert_eq!(peer.diagnostics.late_dropped, 2);
+    assert_eq!(peer.diagnostics.late_dropped_far, 1);
+    peer.pop(ready).unwrap();
+    assert_eq!(peer.diagnostics.plc_frames, 1);
+    peer.hold = true;
+    peer.pop(ready).unwrap();
+    assert_eq!(peer.diagnostics.plc_frames, 2);
+    peer.skip(2).unwrap();
+    assert_eq!(peer.diagnostics.skipped_frames, 2);
+    assert_eq!(peer.diagnostics.plc_frames, 4);
+    peer.skip(WINDOW).unwrap();
+    assert_eq!(peer.diagnostics.skipped_frames, 2 + WINDOW);
+    assert_eq!(peer.diagnostics.plc_frames, 4);
+    assert_eq!(peer.diagnostics.resyncs, 1);
+    peer.insert(peer.next.wrapping_add(WINDOW), &chunk, ready)
+        .unwrap();
+    assert_eq!(peer.diagnostics.resyncs, 2);
+    assert_eq!(peer.diagnostics.late_dropped, 2);
+}
+
+#[test]
+fn backlog_trim_counts_only_skipped_frames_and_corruption_counts_plc() {
+    let now = Instant::now();
+    let mut peer = PeerJitterBuffer::new(0, now, 3).unwrap();
+    let mut enc = encoder().unwrap();
+    for sequence in 0..12 {
+        peer.insert(sequence, &encode(&mut enc, 0.5), now).unwrap();
+    }
+    peer.trim_backlog().unwrap();
+    assert_eq!(peer.diagnostics.skipped_frames, 6);
+    assert_eq!(peer.diagnostics.plc_frames, 0);
+    assert_eq!(peer.diagnostics.resyncs, 0);
+    let mut corrupt = PeerJitterBuffer::new(0, now, 1).unwrap();
+    corrupt
+        .insert(0, &[0xff; crate::codec::PAYLOAD_SIZE], now)
+        .unwrap();
+    corrupt.pop(now + CHUNK_TIME).unwrap();
+    assert_eq!(corrupt.diagnostics.plc_frames, 1);
+}

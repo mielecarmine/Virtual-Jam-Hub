@@ -17,6 +17,9 @@ pub struct Stats {
     pub input_peak: AtomicU32,
     pub input_callbacks: AtomicU32,
     pub output_callbacks: AtomicU32,
+    pub not_ready_samples: AtomicU32,
+    pub align_dropped_samples: AtomicU32,
+    pub last_output_frames: AtomicU32,
     pub input_overflows: AtomicU32,
     pub output_underflows: AtomicU32,
     pub input_errors: AtomicU32,
@@ -25,7 +28,29 @@ pub struct Stats {
     pub playback_started: AtomicBool,
 }
 
+/// Relaxed snapshots of RT counters; samples are mono frames summed across active peers.
+// These values are exported by the optional session logger and exercised by RT tests.
+#[cfg_attr(not(feature = "telemetry-log"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AudioTelemetry {
+    pub input_callbacks: u32,
+    pub output_callbacks: u32,
+    pub not_ready_samples: u32,
+    pub align_dropped_samples: u32,
+    pub last_output_frames: u32,
+}
+
 impl Stats {
+    pub fn telemetry(&self) -> AudioTelemetry {
+        AudioTelemetry {
+            input_callbacks: self.input_callbacks.load(Ordering::Relaxed),
+            output_callbacks: self.output_callbacks.load(Ordering::Relaxed),
+            not_ready_samples: self.not_ready_samples.load(Ordering::Relaxed),
+            align_dropped_samples: self.align_dropped_samples.load(Ordering::Relaxed),
+            last_output_frames: self.last_output_frames.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn has_hardware_errors(&self) -> bool {
         [
             &self.input_errors,
@@ -141,6 +166,10 @@ pub fn playback<T: Sample + FromSample<f32>>(
         data.fill(T::EQUILIBRIUM);
         return;
     }
+    stats.last_output_frames.store(
+        u32::try_from(data.len() / channels).unwrap_or(u32::MAX),
+        Ordering::Relaxed,
+    );
     if !*started {
         if net_to_speaker.slots() < PREFILL_SAMPLES.max(data.len() / channels) {
             data.fill(T::EQUILIBRIUM);

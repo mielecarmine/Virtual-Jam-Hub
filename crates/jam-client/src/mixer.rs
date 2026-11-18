@@ -97,7 +97,7 @@ impl RxChannels {
     }
 
     /// IDs are validated by the protocol and mapped directly to fixed slots `0..MAX_PEERS`.
-    pub fn push(&mut self, id: u8, chunk: &[f32]) {
+    pub fn push(&mut self, id: u8, chunk: &[f32]) -> bool {
         let index = usize::from(id) - 1;
         let control = &self.controls[index];
         let mut epoch = control.epoch.load(Ordering::Relaxed);
@@ -114,6 +114,9 @@ impl RxChannels {
             for &value in chunk {
                 let _ = ring.push(QueuedSample { value, epoch });
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -138,7 +141,7 @@ impl Mixer {
         capture
     }
 
-    fn align(&mut self, frames: usize) {
+    fn align(&mut self, frames: usize, stats: &Stats) {
         // Only the consumer discards audio. Snapshot each queue so work stays bounded.
         // Keep the callback's demand AND the reserve, rather than consuming the reserve.
         let target = frames.saturating_add(RX_TARGET_SAMPLES);
@@ -155,6 +158,7 @@ impl Mixer {
                     .is_ok_and(|sample| sample.epoch != epoch || epoch % 2 == 0)
                 {
                     let _ = ring.pop();
+                    stats.align_dropped_samples.fetch_add(1, Ordering::Relaxed);
                 } else {
                     break;
                 }
@@ -163,6 +167,7 @@ impl Mixer {
             if queued > target {
                 for _ in 0..queued - target {
                     let _ = ring.pop();
+                    stats.align_dropped_samples.fetch_add(1, Ordering::Relaxed);
                 }
             }
             // A hardware block larger than the ring budget must still be able to start.
@@ -185,10 +190,14 @@ impl Mixer {
             data.fill(T::EQUILIBRIUM);
             return;
         }
+        stats.last_output_frames.store(
+            u32::try_from(data.len() / channels).unwrap_or(u32::MAX),
+            Ordering::Relaxed,
+        );
         if let Some(local) = &mut self.local {
             local.align(data.len() / channels);
         }
-        self.align(data.len() / channels);
+        self.align(data.len() / channels, stats);
         let mut starved = [false; MAX_PEERS];
         let mut peaks = [0.0_f32; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
@@ -223,6 +232,9 @@ impl Mixer {
             {
                 let epoch = control.epoch.load(Ordering::Relaxed);
                 if !self.ready[index] || epoch != self.epochs[index] || epoch % 2 == 0 {
+                    if epoch % 2 != 0 {
+                        stats.not_ready_samples.fetch_add(1, Ordering::Relaxed);
+                    }
                     continue;
                 }
                 // Bounded by the queue capacity, including stale samples after a disconnect.
