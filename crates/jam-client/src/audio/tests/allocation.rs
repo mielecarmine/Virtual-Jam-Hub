@@ -42,23 +42,23 @@ fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
     let (mut mic, mut net_input) = RingBuffer::new(RING_CAPACITY);
     let (mut net_output, mut speaker) = RingBuffer::new(RING_CAPACITY);
     let input = [0.5; BUFFER_FRAMES];
-    let mut output = [0.0; BUFFER_FRAMES];
+    let mut output = [0.0; BUFFER_FRAMES * 2];
     let mut started = false;
     let integer_input = [1_i32 << 30; PREFILL_SAMPLES];
     let mut integer_output = [0_u16; PREFILL_SAMPLES];
 
     ALLOCATIONS.with(|count| count.set(Some(0)));
-    playback(&mut output, 1, &mut speaker, &mut started, &stats);
+    playback(&mut output, 2, &mut speaker, &mut started, &stats);
     for _ in 0..100 {
         capture(&input, 1, &mut mic, None, &stats);
         bridge(&mut net_input, &mut net_output);
-        playback(&mut output, 1, &mut speaker, &mut started, &stats);
+        playback(&mut output, 2, &mut speaker, &mut started, &stats);
     }
     for _ in 0..100 {
         capture(&input, 1, &mut mic, None, &stats);
     }
     for _ in 0..100 {
-        playback(&mut output, 1, &mut speaker, &mut started, &stats);
+        playback(&mut output, 2, &mut speaker, &mut started, &stats);
     }
     capture(&input[..64], 1, &mut mic, None, &stats);
     playback(&mut output[..64], 1, &mut speaker, &mut started, &stats);

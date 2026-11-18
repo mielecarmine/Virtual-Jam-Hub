@@ -1,5 +1,23 @@
 use super::*;
 
+#[test]
+fn catalog_checks_input_and_output_buffers_with_directional_selectors() {
+    let configs = [1, 2, 4].map(|channels| {
+        cpal::SupportedStreamConfigRange::new(
+            channels,
+            cpal::SampleRate(audio::SAMPLE_RATE),
+            cpal::SampleRate(audio::SAMPLE_RATE),
+            cpal::SupportedBufferSize::Range { min: 128, max: 256 },
+            cpal::SampleFormat::F32,
+        )
+    });
+    for direction in [Direction::Input, Direction::Output] {
+        assert_eq!(info("ASIO", &configs, direction).buffers, [128, 256]);
+        assert_eq!(info("Mono", &configs[..1], direction).buffers, [128, 256]);
+        assert!(info("Unavailable", &[], direction).buffers.is_empty());
+    }
+}
+
 pub(crate) fn temporary_path(label: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     std::env::temp_dir()

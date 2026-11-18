@@ -122,12 +122,12 @@ impl Session {
                 ..preferences.clone()
             };
             let input_config =
-                audio::select_config_for_buffer(input.supported_input_configs()?, frames)
+                audio::select_input_config_for_buffer(input.supported_input_configs()?, frames)
                     .ok_or_else(|| {
                         io::Error::other("Input incompatibile con 48 kHz e il buffer scelto.")
                     })?;
             let output_config =
-                audio::select_config_for_buffer(output.supported_output_configs()?, frames)
+                audio::select_output_config_for_buffer(output.supported_output_configs()?, frames)
                     .ok_or_else(|| {
                         io::Error::other("Output incompatibile con 48 kHz e il buffer scelto.")
                     })?;

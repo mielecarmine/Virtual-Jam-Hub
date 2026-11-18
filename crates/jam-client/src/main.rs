@@ -45,9 +45,9 @@ fn run_cli(options: &cli::Options) -> Result<(), Box<dyn Error>> {
         return cli::list_devices(&host);
     }
     let (input, output) = cli::devices(&host, options.input.as_deref(), options.output.as_deref())?;
-    let input_config = audio::select_config(input.supported_input_configs()?)
+    let input_config = audio::select_input_config(input.supported_input_configs()?)
         .ok_or_else(|| io::Error::other("Input does not support 48000 Hz / 128 frames"))?;
-    let output_config = audio::select_config(output.supported_output_configs()?)
+    let output_config = audio::select_output_config(output.supported_output_configs()?)
         .ok_or_else(|| io::Error::other("Output does not support 48000 Hz / 128 frames"))?;
     describe_audio(
         &host,

@@ -78,15 +78,36 @@ pub struct AudioConfig {
     pub format: SampleFormat,
 }
 
-pub fn select_config(
+pub fn select_input_config(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
 ) -> Option<AudioConfig> {
-    select_config_for_buffer(configs, 128)
+    select_input_config_for_buffer(configs, 128)
 }
 
-pub fn select_config_for_buffer(
+pub fn select_output_config(
+    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+) -> Option<AudioConfig> {
+    select_output_config_for_buffer(configs, 128)
+}
+
+pub fn select_input_config_for_buffer(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
     frames: u32,
+) -> Option<AudioConfig> {
+    select_config_for_buffer(configs, frames, false)
+}
+
+pub fn select_output_config_for_buffer(
+    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+    frames: u32,
+) -> Option<AudioConfig> {
+    select_config_for_buffer(configs, frames, true)
+}
+
+fn select_config_for_buffer(
+    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+    frames: u32,
+    output: bool,
 ) -> Option<AudioConfig> {
     configs
         .filter(|config| {
@@ -102,6 +123,8 @@ pub fn select_config_for_buffer(
         .min_by_key(|config| {
             (
                 config.sample_format() != SampleFormat::F32,
+                // Output: stereo first, then the smallest multi-out, then mono.
+                output && config.channels() == 1,
                 config.channels(),
             )
         })

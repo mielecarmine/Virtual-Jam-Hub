@@ -40,7 +40,7 @@ fn config(
 #[test]
 fn selects_f32_48khz_128_frames_and_fewest_channels() {
     let range = SupportedBufferSize::Range { min: 64, max: 256 };
-    let selected = select_config(
+    let selected = select_input_config(
         [
             config(1, SampleFormat::I16, range),
             config(2, SampleFormat::F32, range),
@@ -56,6 +56,116 @@ fn selects_f32_48khz_128_frames_and_fewest_channels() {
 }
 
 #[test]
+fn output_prefers_stereo_while_input_stays_mono_for_all_buffers() {
+    for frames in [64, 128, 256] {
+        // ASIO exposes every channel count up to the hardware maximum.
+        let configs = [4, 1, 2]
+            .map(|channels| config(channels, SampleFormat::F32, SupportedBufferSize::Unknown));
+        let output = select_output_config_for_buffer(configs.into_iter(), frames).unwrap();
+        let input = select_input_config_for_buffer(configs.into_iter(), frames).unwrap();
+        assert_eq!(output.stream.channels, 2);
+        assert_eq!(input.stream.channels, 1);
+        assert_eq!(output.stream.sample_rate, SampleRate(SAMPLE_RATE));
+        assert_eq!(output.stream.buffer_size, BufferSize::Fixed(frames));
+        assert_eq!(
+            select_output_config(configs.into_iter())
+                .unwrap()
+                .stream
+                .channels,
+            2
+        );
+    }
+}
+
+#[test]
+fn output_falls_back_to_smallest_multichannel_then_mono() {
+    for (channels, expected) in [(&[1, 8, 4][..], 4), (&[8, 4][..], 4), (&[1][..], 1)] {
+        let selected =
+            select_output_config(channels.iter().map(|&channels| {
+                config(channels, SampleFormat::F32, SupportedBufferSize::Unknown)
+            }))
+            .unwrap();
+        assert_eq!(selected.stream.channels, expected);
+    }
+}
+
+#[test]
+fn output_keeps_format_priority_and_selects_stereo_within_each_format() {
+    for (configs, expected_channels, expected_format) in [
+        (
+            [(2, SampleFormat::I16), (1, SampleFormat::F32)],
+            1,
+            SampleFormat::F32,
+        ),
+        (
+            [(2, SampleFormat::I16), (4, SampleFormat::F32)],
+            4,
+            SampleFormat::F32,
+        ),
+        (
+            [(1, SampleFormat::I16), (2, SampleFormat::I16)],
+            2,
+            SampleFormat::I16,
+        ),
+    ] {
+        let selected = select_output_config(
+            configs
+                .into_iter()
+                .map(|(channels, format)| config(channels, format, SupportedBufferSize::Unknown)),
+        )
+        .unwrap();
+        assert_eq!(selected.stream.channels, expected_channels);
+        assert_eq!(selected.format, expected_format);
+    }
+}
+
+#[test]
+fn output_filters_incompatible_stereo_before_channel_selection() {
+    let mono = config(1, SampleFormat::F32, SupportedBufferSize::Unknown);
+    let stereo_buffer = config(
+        2,
+        SampleFormat::F32,
+        SupportedBufferSize::Range { min: 256, max: 512 },
+    );
+    let stereo_rate = cpal::SupportedStreamConfigRange::new(
+        2,
+        SampleRate(44_100),
+        SampleRate(44_100),
+        SupportedBufferSize::Unknown,
+        SampleFormat::F32,
+    );
+    let zero_channels = config(0, SampleFormat::F32, SupportedBufferSize::Unknown);
+    let selected =
+        select_output_config([stereo_buffer, stereo_rate, zero_channels, mono].into_iter())
+            .unwrap();
+    assert_eq!(selected.stream.channels, 1);
+    assert!(
+        select_output_config([stereo_buffer, stereo_rate, zero_channels].into_iter()).is_none()
+    );
+    assert!(select_output_config(std::iter::empty()).is_none());
+}
+
+#[test]
+fn playback_duplicates_mono_to_every_output_channel() {
+    for channels in [1, 2, 4] {
+        let stats = Stats::default();
+        let (mut producer, mut consumer) = RingBuffer::new(PREFILL_SAMPLES);
+        for sample in 0..PREFILL_SAMPLES {
+            producer
+                .push(if sample % 2 == 0 { 0.25 } else { -0.5 })
+                .unwrap();
+        }
+        let mut output = vec![0.0_f32; PREFILL_SAMPLES * channels];
+        playback(&mut output, channels, &mut consumer, &mut false, &stats);
+        for (index, frame) in output.chunks_exact(channels).enumerate() {
+            let expected = if index % 2 == 0 { 0.25 } else { -0.5 };
+            assert!(frame.iter().all(|&sample| sample == expected));
+        }
+        assert!(!stats.has_errors());
+    }
+}
+
+#[test]
 fn selects_requested_hardware_buffer_and_rejects_out_of_range_sizes() {
     for frames in [64, 128, 256] {
         let range = config(
@@ -63,7 +173,7 @@ fn selects_requested_hardware_buffer_and_rejects_out_of_range_sizes() {
             SampleFormat::F32,
             SupportedBufferSize::Range { min: 64, max: 256 },
         );
-        let selected = select_config_for_buffer([range].into_iter(), frames).unwrap();
+        let selected = select_input_config_for_buffer([range].into_iter(), frames).unwrap();
         assert_eq!(selected.stream.buffer_size, BufferSize::Fixed(frames));
         assert_eq!(selected.stream.sample_rate, SampleRate(SAMPLE_RATE));
     }
@@ -72,7 +182,7 @@ fn selects_requested_hardware_buffer_and_rejects_out_of_range_sizes() {
         SampleFormat::F32,
         SupportedBufferSize::Range { min: 128, max: 256 },
     );
-    assert!(select_config_for_buffer([range].into_iter(), 64).is_none());
+    assert!(select_input_config_for_buffer([range].into_iter(), 64).is_none());
 }
 
 fn check_hardware_format<T: cpal::SizedSample + FromSample<f32> + std::fmt::Debug + PartialEq>()
@@ -121,10 +231,11 @@ fn all_cpal_hardware_formats_convert_through_f32_and_use_correct_silence() {
 #[test]
 fn rejects_incompatible_rate_and_buffer_and_accepts_integer_devices() {
     let fixed = SupportedBufferSize::Range { min: 256, max: 512 };
-    assert!(select_config([config(1, SampleFormat::F32, fixed)].into_iter()).is_none());
-    let integer =
-        select_config([config(1, SampleFormat::I16, SupportedBufferSize::Unknown)].into_iter())
-            .expect("integer devices convert to internal f32");
+    assert!(select_input_config([config(1, SampleFormat::F32, fixed)].into_iter()).is_none());
+    let integer = select_input_config(
+        [config(1, SampleFormat::I16, SupportedBufferSize::Unknown)].into_iter(),
+    )
+    .expect("integer devices convert to internal f32");
     assert_eq!(integer.format, SampleFormat::I16);
     let wrong_rate = cpal::SupportedStreamConfigRange::new(
         1,
@@ -133,11 +244,13 @@ fn rejects_incompatible_rate_and_buffer_and_accepts_integer_devices() {
         SupportedBufferSize::Unknown,
         SampleFormat::F32,
     );
-    assert!(select_config([wrong_rate].into_iter()).is_none());
-    assert!(select_config(std::iter::empty()).is_none());
+    assert!(select_input_config([wrong_rate].into_iter()).is_none());
+    assert!(select_input_config(std::iter::empty()).is_none());
     assert!(
-        select_config([config(1, SampleFormat::F32, SupportedBufferSize::Unknown)].into_iter())
-            .is_some()
+        select_input_config(
+            [config(1, SampleFormat::F32, SupportedBufferSize::Unknown)].into_iter()
+        )
+        .is_some()
     );
 }
 
