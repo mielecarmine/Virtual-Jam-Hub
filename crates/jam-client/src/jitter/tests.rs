@@ -104,7 +104,9 @@ fn latency_plateaus_recover_within_fifty_ms_and_release_backlog() {
             let mut buffer = PeerJitterBuffer::new(0, start, nominal).unwrap();
             buffer.target = target;
             let mut enc = encoder().unwrap();
-            let mut pending: Vec<_> = (0..4000)
+            // Leave enough stable time to decay from the adaptive maximum after
+            // delayed tail packets arrive behind the resumed, current stream.
+            let mut pending: Vec<_> = (0..6000)
                 .map(|sequence| {
                     let due = sequence
                         + if (400..3200).contains(&sequence) {
@@ -117,7 +119,7 @@ fn latency_plateaus_recover_within_fifty_ms_and_release_backlog() {
                 .collect();
             pending.sort_by_key(|&(due, sequence, _)| std::cmp::Reverse((due, sequence)));
             let mut recovered = None;
-            for tick in 0..4000 {
+            for tick in 0..6000 {
                 let now = start + CHUNK_TIME * tick;
                 while pending.last().is_some_and(|&(due, _, _)| due <= tick) {
                     let (_, sequence, frame) = pending.pop().unwrap();
@@ -125,7 +127,11 @@ fn latency_plateaus_recover_within_fifty_ms_and_release_backlog() {
                     assert_eq!(buffer.last_received, now);
                 }
                 let plc = buffer.diagnostics.plc_frames;
-                for _ in 0..buffer.playout_frames(now, now, 1).unwrap() {
+                let frames = buffer.playout_frames(now, now, 1).unwrap();
+                if tick > 3240 {
+                    assert_eq!(frames, 1, "playout starved at tick {tick}");
+                }
+                for _ in 0..frames {
                     let audio = buffer.pop(now).unwrap().unwrap();
                     if tick >= 400 + delay && buffer.diagnostics.plc_frames == plc {
                         recovered.get_or_insert(tick);
@@ -149,7 +155,11 @@ fn latency_plateaus_recover_within_fifty_ms_and_release_backlog() {
                 recovered.unwrap() - (400 + delay) <= 20,
                 "delay={delay}, target={target}"
             );
-            assert_eq!(buffer.target, nominal);
+            assert_eq!(
+                buffer.target, nominal,
+                "delay={delay}, initial target={target}, diagnostics={:?}",
+                buffer.diagnostics
+            );
         }
     }
 }
@@ -488,6 +498,115 @@ fn backlog_is_bounded_by_sequence_span_including_wrap_and_holes() {
             .flatten()
             .all(|(seq, _)| seq.wrapping_sub(buffer.next) < 6)
     );
+}
+
+#[test]
+fn backlog_trim_preserves_current_tick_and_does_not_repeat_on_a_stable_stream() {
+    for initial in [0_u32, u32::MAX] {
+        let start = Instant::now();
+        let mut buffer = PeerJitterBuffer::new(initial, start, 3).unwrap();
+        let ready = buffer.ready_at;
+        let mut encoder = encoder().unwrap();
+        let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+        let budget = u32::try_from(buffer.target + QUEUE_SLACK + 1).unwrap();
+        let mut packets: Vec<_> = (0..=budget)
+            .map(|offset| {
+                let frame = encode(&mut encoder, 0.5);
+                buffer
+                    .insert(initial.wrapping_add(offset), &frame, start)
+                    .unwrap();
+                frame
+            })
+            .collect();
+        let frames = buffer.playout_frames(ready, ready, 1).unwrap();
+        assert_eq!(frames, 1, "a trim must preserve the current tick");
+        assert_eq!(buffer.next, initial.wrapping_add(1));
+        assert_eq!(buffer.last, decode(&mut reference, &packets[0]));
+        assert_eq!(
+            buffer.pop(ready).unwrap().unwrap(),
+            decode(&mut reference, &packets[1])
+        );
+        for tick in 1..=32 {
+            let now = ready + CHUNK_TIME * tick;
+            let frame = encode(&mut encoder, 0.5);
+            buffer
+                .insert(initial.wrapping_add(budget + tick), &frame, now)
+                .unwrap();
+            packets.push(frame);
+            assert_eq!(buffer.playout_frames(now, now, 1).unwrap(), 1);
+            assert_eq!(
+                buffer.pop(now).unwrap().unwrap(),
+                decode(&mut reference, &packets[(tick + 1) as usize])
+            );
+            assert_eq!(buffer.pending_playout, 0);
+            assert_eq!(buffer.diagnostics.skipped_frames, 1);
+            assert_eq!(buffer.diagnostics.plc_frames, 0);
+        }
+    }
+}
+
+#[test]
+fn backlog_trim_reduces_pending_excess_but_preserves_downstream_capacity() {
+    for skipped in [1_u32, 7, 12] {
+        let start = Instant::now();
+        let initial = u32::MAX - 2;
+        let mut buffer = PeerJitterBuffer::new(initial, start, 3).unwrap();
+        let ready = buffer.ready_at;
+        let mut encoder = encoder().unwrap();
+        let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+        let budget = u32::try_from(buffer.target + QUEUE_SLACK + 2).unwrap();
+        let packets: Vec<_> = (0..budget + skipped)
+            .map(|offset| {
+                let frame = encode(&mut encoder, 0.5);
+                buffer
+                    .insert(initial.wrapping_add(offset), &frame, start)
+                    .unwrap();
+                frame
+            })
+            .collect();
+        assert_eq!(
+            buffer
+                .playout_frames(ready, ready + CHUNK_TIME * 9, 0)
+                .unwrap(),
+            0
+        );
+        assert_eq!(buffer.pending_playout, 10);
+        assert_eq!(buffer.next, initial);
+        assert_eq!(buffer.diagnostics.skipped_frames, 0);
+        let now = ready + CHUNK_TIME * 10;
+        assert_eq!(buffer.playout_frames(now, now, 2).unwrap(), 2);
+        assert_eq!(buffer.diagnostics.skipped_frames, skipped);
+        assert_eq!(buffer.next, initial.wrapping_add(skipped));
+        let pending = 11_u128.saturating_sub(u128::from(skipped)).max(2) - 2;
+        assert_eq!(buffer.pending_playout, pending);
+        for packet in &packets[..skipped as usize] {
+            decode(&mut reference, packet);
+        }
+        for packet in &packets[skipped as usize..skipped as usize + 2] {
+            assert_eq!(
+                buffer.pop(now).unwrap().unwrap(),
+                decode(&mut reference, packet)
+            );
+        }
+        let now = now + CHUNK_TIME;
+        let frames = buffer.playout_frames(now, now, CAPACITY).unwrap();
+        assert_eq!(u128::from(frames), pending + 1);
+        for offset in 0..frames {
+            let packet = packets
+                .get((skipped + 2 + offset) as usize)
+                .map_or(&[][..], |packet| &packet[..]);
+            assert_eq!(
+                buffer.pop(now).unwrap().unwrap(),
+                decode(&mut reference, packet)
+            );
+        }
+        assert_eq!(buffer.pending_playout, 0);
+        assert_eq!(buffer.diagnostics.skipped_frames, skipped);
+        assert_eq!(
+            buffer.diagnostics.plc_frames,
+            (2 + frames).saturating_sub(budget)
+        );
+    }
 }
 
 #[test]
