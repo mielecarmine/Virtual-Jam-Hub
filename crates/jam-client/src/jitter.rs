@@ -275,9 +275,12 @@ impl PeerJitterBuffer {
                 .min(capacity as u128)
                 .min(u128::from(WINDOW));
             self.trim_backlog_with_allowance(usize::try_from(deliverable).unwrap_or(CAPACITY))?;
+            // The trim budget already reserves this tick's deliverable frames.
+            // Retire only excess pending deadlines, or a trim can starve every tick.
             self.pending_playout = self
                 .pending_playout
-                .saturating_sub(u128::from(self.next.wrapping_sub(before)));
+                .saturating_sub(u128::from(self.next.wrapping_sub(before)))
+                .max(deliverable);
             let frames = self
                 .pending_playout
                 .min(capacity as u128)

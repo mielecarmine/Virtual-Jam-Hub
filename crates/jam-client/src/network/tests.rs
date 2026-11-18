@@ -11,7 +11,9 @@ fn latency_plateaus_keep_peer_and_arrival_history_alive_and_restore_audio() {
             let start = network.started;
             let (mut speaker, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
             let mut enc = codec::encoder().unwrap();
-            let mut packets: Vec<_> = (0..4000)
+            // Late tail packets can raise the target after the plateau ends;
+            // allow one stable second per adaptive step before checking nominal.
+            let mut packets: Vec<_> = (0..6000)
                 .map(|sequence| {
                     let mut bytes = [0; PACKET_SIZE];
                     AudioHeader::new(2, STREAM_PRIMARY, sequence, 0)
@@ -30,7 +32,7 @@ fn latency_plateaus_keep_peer_and_arrival_history_alive_and_restore_audio() {
                 .collect();
             packets.sort_by_key(|&(due, sequence, _)| std::cmp::Reverse((due, sequence)));
             let mut recovered = None;
-            for tick in 0..4000 {
+            for tick in 0..6000 {
                 let now = start + CHUNK_TIME * tick;
                 while packets.last().is_some_and(|&(due, _, _)| due <= tick) {
                     let (_, _, bytes) = packets.pop().unwrap();
@@ -49,7 +51,8 @@ fn latency_plateaus_keep_peer_and_arrival_history_alive_and_restore_audio() {
                     assert!(peer.buffered_ms() > 0.0);
                 }
                 if tick > 3240 {
-                    assert!(peer.buffered_ms() <= (nominal + 4) as f64 * 2.5);
+                    assert!(audible, "playout starved at tick {tick}");
+                    assert!(peer.buffered_ms() <= (peer.target_chunks() + 4) as f64 * 2.5);
                 }
                 if tick == 3199 {
                     // A false five-second retirement would reset these cumulative counts.
@@ -59,7 +62,7 @@ fn latency_plateaus_keep_peer_and_arrival_history_alive_and_restore_audio() {
             assert!(recovered.unwrap() - (400 + delay) <= 20);
             assert_eq!(network.peers[&2].target_chunks(), nominal);
             network
-                .playback(&mut speaker, start + Duration::from_secs(16))
+                .playback(&mut speaker, start + Duration::from_secs(21))
                 .unwrap();
             assert!(network.peers.is_empty());
             assert!(network.arrivals.is_empty());
