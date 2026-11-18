@@ -109,13 +109,31 @@ pub struct Catalog {
     pub default_output: Option<String>,
 }
 
-fn info(name: &str, configs: &[cpal::SupportedStreamConfigRange]) -> DeviceInfo {
+#[derive(Clone, Copy)]
+enum Direction {
+    Input,
+    Output,
+}
+
+fn info(
+    name: &str,
+    configs: &[cpal::SupportedStreamConfigRange],
+    direction: Direction,
+) -> DeviceInfo {
     DeviceInfo {
         name: name.into(),
         buffers: BUFFER_SIZES
             .into_iter()
             .filter(|frames| {
-                audio::select_config_for_buffer(configs.iter().copied(), *frames).is_some()
+                match direction {
+                    Direction::Input => {
+                        audio::select_input_config_for_buffer(configs.iter().copied(), *frames)
+                    }
+                    Direction::Output => {
+                        audio::select_output_config_for_buffer(configs.iter().copied(), *frames)
+                    }
+                }
+                .is_some()
             })
             .collect(),
     }
@@ -139,13 +157,15 @@ impl Catalog {
             if let Ok(configs) = device.supported_input_configs() {
                 let configs: Vec<_> = configs.collect();
                 if !configs.is_empty() {
-                    catalog.inputs.push(info(&name, &configs));
+                    catalog.inputs.push(info(&name, &configs, Direction::Input));
                 }
             }
             if let Ok(configs) = device.supported_output_configs() {
                 let configs: Vec<_> = configs.collect();
                 if !configs.is_empty() {
-                    catalog.outputs.push(info(&name, &configs));
+                    catalog
+                        .outputs
+                        .push(info(&name, &configs, Direction::Output));
                 }
             }
         }

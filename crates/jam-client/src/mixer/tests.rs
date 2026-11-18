@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn remote_audio_and_local_monitor_fill_every_output_channel() {
+    for output_channels in [1, 2, 4] {
+        for (remote, local) in [(0.25_f32, 0.0_f32), (0.0, 0.5), (0.25, 0.5)] {
+            let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
+            let mut monitor = mixer.enable_local_monitor();
+            let stats = Stats::default();
+            let (mut mic, _net) = RingBuffer::new(1);
+            crate::audio::capture(&[local], 1, &mut mic, Some(&mut monitor), &stats);
+            rx.push(1, &[remote; RX_TARGET_SAMPLES + 1]);
+            let mut out = vec![0.0_f32; output_channels];
+            mixer.playback(&mut out, output_channels, &stats);
+            assert_eq!(out, vec![(remote + local).tanh(); output_channels]);
+            assert!(!stats.has_errors());
+        }
+    }
+}
+
+#[test]
 fn local_monitor_controls_and_solos_never_change_transmitted_samples() {
     let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let mut monitor = mixer.enable_local_monitor();
