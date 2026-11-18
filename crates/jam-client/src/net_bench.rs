@@ -92,7 +92,7 @@ struct Peer {
 impl Peer {
     fn new(server: SocketAddr, index: usize) -> io::Result<Self> {
         let (capture, mic) = RingBuffer::new(FRAME_SAMPLES);
-        let (rx, mixer) = mixer::channels();
+        let (rx, mixer) = mixer::channels(FRAME_SAMPLES);
         Ok(Self {
             network: Network::connect(server, &format!("bench-{index}"))?,
             capture,

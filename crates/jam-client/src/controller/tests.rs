@@ -256,3 +256,24 @@ fn runtime_error_finalizes_log_and_log_open_failure_keeps_session_connected() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
+
+#[test]
+fn active_wait_preserves_commands_and_reports_channel_shutdown() {
+    let (sender, receiver) = crossbeam_channel::unbounded();
+    for active in [false, true] {
+        sender.send(Command::Disconnect).unwrap();
+        assert!(matches!(
+            receive_command(&receiver, Duration::from_micros(250), active),
+            Ok(Command::Disconnect)
+        ));
+        assert!(matches!(
+            receive_command(&receiver, Duration::from_micros(250), active),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        ));
+    }
+    drop(sender);
+    assert!(matches!(
+        receive_command(&receiver, Duration::from_micros(250), true),
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    ));
+}

@@ -206,9 +206,7 @@ fn short_deadline_skips_decode_packets_and_conceal_holes_across_wrap() {
     decode(&mut reference, &[]);
     let resumed = encode(&mut encoder, 0.5);
     buffer.insert(1, &resumed, ready).unwrap();
-    buffer
-        .playout_frames(ready, ready + CHUNK_TIME * 2, 1)
-        .unwrap();
+    buffer.skip(2).unwrap();
     assert_eq!(buffer.next, 1);
     assert_eq!(
         buffer.pop(ready).unwrap().unwrap(),
@@ -347,22 +345,23 @@ fn backlog_is_bounded_by_sequence_span_including_wrap_and_holes() {
 #[test]
 fn missed_deadlines_respect_startup_and_skip_large_stalls_in_constant_work() {
     let start = Instant::now();
-    let mut buffer = PeerJitterBuffer::new(u32::MAX - 2, start, 3).unwrap();
-    buffer
-        .playout_frames(start, start + CHUNK_TIME * 2, 1)
-        .unwrap();
-    assert_eq!(buffer.next, u32::MAX - 2);
-    buffer
-        .playout_frames(start, start + CHUNK_TIME * 10, 1)
-        .unwrap();
-    assert_eq!(buffer.next, 4);
-    assert!(buffer.started);
-    let frame = encode(&mut encoder().unwrap(), 0.5);
-    buffer.insert(3, &frame, start + CHUNK_TIME * 10).unwrap();
+    let mut buffer = PeerJitterBuffer::new(100, start, 3).unwrap();
     assert_eq!(
-        buffer.next, 4,
-        "old packets must not rewind a skipped startup"
+        buffer
+            .playout_frames(start, start + CHUNK_TIME * 2, 1)
+            .unwrap(),
+        0
     );
+    assert_eq!(buffer.next, 100);
+    assert_eq!(
+        buffer
+            .playout_frames(start + CHUNK_TIME * 3, start + CHUNK_TIME * 1000, 1)
+            .unwrap(),
+        1
+    );
+    assert_eq!(buffer.next, 100 + 998 - WINDOW);
+    assert!(buffer.started);
+    assert_eq!(buffer.pending_playout, u128::from(WINDOW - 1));
 }
 
 #[test]
@@ -376,7 +375,7 @@ fn peer_starting_between_global_ticks_does_not_skip_its_first_frame() {
     buffer
         .playout_frames(start, start + CHUNK_TIME * 5, 1)
         .unwrap();
-    assert_eq!(buffer.next, 101);
+    assert_eq!(buffer.next, 100);
 }
 
 #[test]
@@ -445,8 +444,9 @@ fn catch_up_respects_each_peers_startup_and_downstream_capacity() {
         let frames = buffer
             .playout_frames(ready, ready + CHUNK_TIME * 5, capacity)
             .unwrap();
-        assert_eq!(frames, u32::try_from(capacity.max(1)).unwrap());
-        assert_eq!(buffer.next, 106 - frames);
+        assert_eq!(frames, u32::try_from(capacity).unwrap());
+        assert_eq!(buffer.next, 100);
+        assert_eq!(buffer.diagnostics.skipped_frames, 0);
     }
     let mut later = PeerJitterBuffer::new(100, start + Duration::from_micros(700), 3).unwrap();
     assert_eq!(
@@ -525,4 +525,56 @@ fn backlog_trim_counts_only_skipped_frames_and_corruption_counts_plc() {
         .unwrap();
     corrupt.pop(now + CHUNK_TIME).unwrap();
     assert_eq!(corrupt.diagnostics.plc_frames, 1);
+}
+
+#[test]
+fn full_downstream_preserves_packets_deadlines_and_decoder_history() {
+    let start = Instant::now();
+    let mut buffer = PeerJitterBuffer::new(u32::MAX, start, 3).unwrap();
+    let ready = buffer.ready_at;
+    let mut encoder = encoder().unwrap();
+    let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+    let mut packets = Vec::new();
+    for offset in 0..6 {
+        let frame = encode(&mut encoder, 0.5);
+        buffer
+            .insert(u32::MAX.wrapping_add(offset), &frame, start)
+            .unwrap();
+        packets.push(frame);
+    }
+    assert_eq!(
+        buffer
+            .playout_frames(ready, ready + CHUNK_TIME * 2, 0)
+            .unwrap(),
+        0
+    );
+    assert_eq!(buffer.next, u32::MAX);
+    assert_eq!(buffer.buffered_ms(), 15.0);
+    assert_eq!(buffer.diagnostics.skipped_frames, 0);
+    assert_eq!(buffer.diagnostics.plc_frames, 0);
+    let next_deadline = ready + CHUNK_TIME * 3;
+    assert_eq!(
+        buffer
+            .playout_frames(next_deadline, next_deadline, 1)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        buffer.pop(next_deadline).unwrap().unwrap(),
+        decode(&mut reference, &packets[0])
+    );
+    let next_deadline = next_deadline + CHUNK_TIME;
+    assert_eq!(
+        buffer
+            .playout_frames(next_deadline, next_deadline, 4)
+            .unwrap(),
+        4
+    );
+    for frame in &packets[1..5] {
+        assert_eq!(
+            buffer.pop(next_deadline).unwrap().unwrap(),
+            decode(&mut reference, frame)
+        );
+    }
+    assert_eq!(buffer.diagnostics.skipped_frames, 0);
 }
