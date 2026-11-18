@@ -93,6 +93,8 @@ impl Controller {
 struct Session {
     #[cfg(feature = "telemetry-log")]
     log_preferences: Preferences,
+    #[cfg(feature = "telemetry-log")]
+    log_audio: crate::telemetry_log::AudioInfo,
     input: Option<cpal::Stream>,
     output: Option<cpal::Stream>,
     mic: Consumer<f32>,
@@ -149,6 +151,14 @@ impl Session {
             let session = Self {
                 #[cfg(feature = "telemetry-log")]
                 log_preferences,
+                #[cfg(feature = "telemetry-log")]
+                log_audio: crate::telemetry_log::AudioInfo {
+                    input_channels: input_config.stream.channels,
+                    output_channels: output_config.stream.channels,
+                    input_sample_rate: input_config.stream.sample_rate.0,
+                    output_sample_rate: output_config.stream.sample_rate.0,
+                    last_output_frames: 0,
+                },
                 input: Some(input),
                 output: Some(output),
                 mic,
@@ -171,6 +181,10 @@ impl Session {
 
 trait ActiveSession {
     #[cfg(feature = "telemetry-log")]
+    fn log_audio(&self) -> crate::telemetry_log::AudioInfo {
+        crate::telemetry_log::AudioInfo::default()
+    }
+    #[cfg(feature = "telemetry-log")]
     fn log_preferences(&self, requested: &Preferences) -> Preferences {
         requested.clone()
     }
@@ -189,6 +203,13 @@ trait ActiveSession {
 
 impl ActiveSession for Session {
     #[cfg(feature = "telemetry-log")]
+    fn log_audio(&self) -> crate::telemetry_log::AudioInfo {
+        crate::telemetry_log::AudioInfo {
+            last_output_frames: self.stats.telemetry().last_output_frames,
+            ..self.log_audio
+        }
+    }
+    #[cfg(feature = "telemetry-log")]
     fn log_preferences(&self, _: &Preferences) -> Preferences {
         self.log_preferences.clone()
     }
@@ -201,7 +222,10 @@ impl ActiveSession for Session {
         ]
     }
     fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
-        self.network.take_telemetry()
+        self.network.take_telemetry().map(|mut metrics| {
+            metrics.audio = self.stats.telemetry();
+            metrics
+        })
     }
     fn mixer_update(&mut self) -> Option<MixerView> {
         self.network.take_roster().map(|peers| MixerView {
@@ -327,6 +351,7 @@ fn control_loop<S: ActiveSession>(
                         match crate::telemetry_log::SessionLog::start(
                             path,
                             &active.log_preferences(&preferences),
+                            active.log_audio(),
                         ) {
                             Ok(writer) => log = Some(writer),
                             Err(error) => send(Event::Error(format!("Telemetry log: {error}"))),

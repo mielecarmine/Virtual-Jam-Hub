@@ -71,6 +71,9 @@ fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
     assert_eq!(allocations, Some(0));
     assert!(stats.input_overflows.load(Ordering::Relaxed) > 0);
     assert!(stats.output_underflows.load(Ordering::Relaxed) > 0);
+    assert!(stats.telemetry().input_callbacks > 0);
+    assert!(stats.telemetry().output_callbacks > 0);
+    assert_eq!(stats.telemetry().last_output_frames, PREFILL_SAMPLES as u32);
 }
 
 #[test]
@@ -101,8 +104,13 @@ fn multichannel_mixer_never_allocates_during_playback_or_peer_reuse() {
         mixer.playback(&mut output, 2, &stats);
     }
     mixer.playback(&mut output[..64], 3, &stats);
+    let snapshot = stats.telemetry();
     let allocations = ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(allocations, Some(0));
+    assert!(snapshot.not_ready_samples > 0);
+    assert!(snapshot.align_dropped_samples > 0);
+    assert!(snapshot.output_callbacks > 0);
+    assert_eq!(snapshot.last_output_frames, BUFFER_FRAMES as u32);
 }
 
 #[test]

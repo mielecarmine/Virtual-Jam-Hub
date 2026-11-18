@@ -657,7 +657,10 @@ fn telemetry_matches_ping_and_publishes_every_half_second() {
     network
         .tick(&mut mic, &mut rx, start + Duration::from_millis(1500))
         .unwrap();
-    assert_eq!(network.take_telemetry().unwrap().rtt_ms, Some(20.0));
+    let metrics = network.take_telemetry().unwrap();
+    assert_eq!(metrics.rtt_ms, Some(20.0));
+    assert_eq!(metrics.rtt_max_ms, Some(20.0));
+    assert_eq!(metrics.worker_max_gap_ms, 480.0);
     assert!(network.take_telemetry().is_none());
     network.publish_telemetry(start + Duration::from_secs(7));
     assert!(network.take_telemetry().unwrap().rtt_ms.is_none());
@@ -854,4 +857,89 @@ fn low_network_jitter_and_one_to_five_ms_worker_delays_keep_nominal_latency() {
             "catch-up should preserve the stream: {emitted}"
         );
     }
+}
+
+#[test]
+fn diagnostic_totals_survive_peer_removal_and_id_reuse_without_loss() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "diagnostic").unwrap();
+    let start = network.started;
+    let (mut rx, _mixer) = crate::mixer::channels();
+    let bytes = packet(2, 0.3);
+    let chunk: Encoded = bytes[AUDIO_HEADER_SIZE..].try_into().unwrap();
+    let mut peer = PeerJitterBuffer::new(100, start, 1).unwrap();
+    peer.insert(100, &chunk, start).unwrap();
+    peer.pop(start + CHUNK_TIME).unwrap();
+    peer.insert(100, &chunk, start + CHUNK_TIME).unwrap();
+    peer.insert(0, &chunk, start + CHUNK_TIME).unwrap();
+    network.peers.insert(2, peer);
+    network.arrivals.insert(2, ArrivalStats::new(100, start));
+    assert!(rx.push(2, &[0.0; FRAME_SAMPLES * 4]));
+    network.playback(&mut rx, start + CHUNK_TIME * 2).unwrap();
+    network.publish_telemetry(start + Duration::from_millis(500));
+    let first = network.take_telemetry().unwrap();
+    assert_eq!(first.loss_percent, 0.0);
+    assert_eq!(first.diagnostics.late_dropped, 2);
+    assert_eq!(first.diagnostics.late_dropped_far, 1);
+    assert_eq!(first.diagnostics.rx_push_dropped, 1);
+    assert_eq!(first.diagnostics.plc_frames, 2);
+    assert_eq!(first.diagnostics.skipped_frames, 1);
+    network.update_roster(&[], &rx);
+    network.publish_telemetry(start + Duration::from_secs(1));
+    assert_eq!(
+        network
+            .take_telemetry()
+            .unwrap()
+            .diagnostics
+            .rx_push_dropped,
+        1
+    );
+    network
+        .peers
+        .insert(2, PeerJitterBuffer::new(0, start, 1).unwrap());
+    network.peers.get_mut(&2).unwrap().diagnostics = crate::jitter::Diagnostics {
+        late_dropped: 7,
+        late_dropped_far: 2,
+        plc_frames: 5,
+        skipped_frames: 9,
+        rx_push_dropped: 4,
+        resyncs: 3,
+    };
+    network
+        .playback(&mut rx, start + Duration::from_secs(6))
+        .unwrap();
+    network.publish_telemetry(start + Duration::from_secs(6));
+    let final_metrics = network.take_telemetry().unwrap();
+    assert_eq!(final_metrics.diagnostics.late_dropped, 9);
+    assert_eq!(final_metrics.diagnostics.late_dropped_far, 3);
+    assert_eq!(final_metrics.diagnostics.plc_frames, 7);
+    assert_eq!(final_metrics.diagnostics.skipped_frames, 10);
+    assert_eq!(final_metrics.diagnostics.rx_push_dropped, 5);
+    assert_eq!(final_metrics.diagnostics.resyncs, 3);
+}
+
+#[test]
+fn interval_peaks_reset_without_repeating_stale_rtt() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "peaks").unwrap();
+    let start = network.started;
+    network.observe_tick(start);
+    network.observe_tick(start + Duration::from_millis(16));
+    network.observe_tick(start + Duration::from_millis(18));
+    network.pending_ping = Some((1, start));
+    network.pong(2, start + Duration::from_millis(90));
+    assert!(network.rtt_max_ms.is_none());
+    network.pong(1, start + Duration::from_millis(80));
+    network.pending_ping = Some((2, start + Duration::from_millis(100)));
+    network.pong(2, start + Duration::from_millis(120));
+    network.publish_telemetry(start + Duration::from_millis(500));
+    let metrics = network.take_telemetry().unwrap();
+    assert_eq!(metrics.rtt_ms, Some(20.0));
+    assert_eq!(metrics.rtt_max_ms, Some(80.0));
+    assert_eq!(metrics.worker_max_gap_ms, 16.0);
+    network.publish_telemetry(start + Duration::from_secs(1));
+    let metrics = network.take_telemetry().unwrap();
+    assert_eq!(metrics.rtt_ms, Some(20.0));
+    assert_eq!(metrics.rtt_max_ms, None);
+    assert_eq!(metrics.worker_max_gap_ms, 0.0);
 }

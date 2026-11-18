@@ -4,6 +4,14 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Telemetry {
     pub rtt_ms: Option<f64>,
+    /// Peak of newly measured RTTs in this interval; None when no Pong was received.
+    #[cfg_attr(not(feature = "telemetry-log"), allow(dead_code))]
+    pub rtt_max_ms: Option<f64>,
+    #[cfg_attr(not(feature = "telemetry-log"), allow(dead_code))]
+    pub worker_max_gap_ms: f64,
+    #[cfg_attr(not(feature = "telemetry-log"), allow(dead_code))]
+    pub diagnostics: crate::jitter::Diagnostics,
+    pub audio: crate::audio::AudioTelemetry,
     pub jitter_ms: f64,
     pub loss_percent: f64,
     /// Maximum queued encoded audio across peers, excluding the hardware/SPSC queues.

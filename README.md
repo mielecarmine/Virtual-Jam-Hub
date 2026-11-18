@@ -623,10 +623,28 @@ le callback audio e il worker CLI `udp-network` non eseguono scritture di log.
 Il percorso diagnostico CLI e il benchmark headless mantengono i propri report.
 
 L'header riporta versione, OS, backend e dispositivi effettivamente aperti,
-buffer hardware richiesto ed endpoint. I campioni ogni 500 ms includono peer
+buffer hardware richiesto, canali e frequenze degli stream CPAL, dimensione
+dell'ultimo blocco di output osservato (`N/A` se nessuna callback) ed endpoint.
+I campioni ogni 500 ms includono peer
 remoti (escluso il client locale), RTT, jitter, perdita, buffer di rete e contatori
 cumulativi di overflow/underflow in campioni audio. Un RTT non disponibile è
 `N/A` ed è escluso dalle statistiche. Il buffer di rete esclude code hardware/SPSC.
+La diagnostica JAM-26 aggiunge i contatori cumulativi di callback input/output,
+campioni silenziati per peer attivi non pronti e campioni scartati dall'allineamento
+(incluse le vecchie generazioni). I campioni sono mono, sommati sui peer, anche
+quando l'uscita è stereo. `last_output_frames` riporta l'ultimo blocco valido del driver.
+I contatori del worker aggregano i peer e conservano i totali dopo timeout/uscita:
+`late_dropped` include `late_dropped_far` (ritardo di almeno 64 frame),
+`plc_frames` conta le decodifiche PLC (anche hold, fallback da payload corrotto e
+frame mancanti durante skip), `skipped_frames` gli avanzamenti skip/trim,
+`rx_push_dropped` i chunk interi rifiutati dalla coda e `resyncs` i riancoraggi/reset
+del cursore, esclusa la creazione iniziale. I contatori audio u32 possono fare wrap;
+quelli del worker saturano. La dimensione del blocco è una misura, non un contatore.
+`worker_max_gap_ms` misura il massimo intervallo tra tick consecutivi del worker;
+`rtt_max_ms` il massimo dei nuovi RTT ricevuti nell'intervallo (`N/A` senza Pong).
+Entrambi i picchi ripartono a ogni pubblicazione da 500 ms; l'ultimo RTT resta
+separato e può comparire su più righe.
+
 Alla disconnessione, errore di sessione o chiusura ordinata, il riepilogo riporta
 minimo, media, p95 (nearest rank) e massimo di tutti i campioni della sessione.
 Le sessioni più brevi del primo intervallo possono avere zero campioni.

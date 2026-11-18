@@ -364,3 +364,46 @@ fn opus_pushes_and_hardware_callbacks_do_not_underflow_with_worker_jitter() {
         }
     }
 }
+
+#[test]
+fn diagnostics_separate_active_prefill_silence_underflow_and_alignment_drops() {
+    let (mut rx, mut mixer) = channels();
+    let stats = Stats::default();
+    let mut output = [0.0; 128 * 2];
+    mixer.playback(&mut output, 2, &stats);
+    assert_eq!(stats.telemetry().not_ready_samples, 0);
+    assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+    mixer.playback(&mut output, 2, &stats);
+    assert_eq!(stats.telemetry().not_ready_samples, 128);
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 0);
+    assert!(rx.push(1, &[0.5; FRAME_SAMPLES * 3]));
+    assert!(!rx.push(1, &[0.5; FRAME_SAMPLES]));
+    mixer.playback(&mut output, 2, &stats);
+    assert_eq!(stats.telemetry().align_dropped_samples, 112);
+    assert_eq!(stats.telemetry().not_ready_samples, 128);
+    mixer.playback(&mut output, 2, &stats);
+    mixer.playback(&mut output, 2, &stats);
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 16);
+    mixer.playback(&mut output, 2, &stats);
+    assert_eq!(stats.telemetry().not_ready_samples, 256);
+    let callbacks = stats.telemetry().output_callbacks;
+    rx.remove(1);
+    mixer.playback(&mut output, 2, &stats);
+    assert_eq!(stats.telemetry().not_ready_samples, 256);
+    assert_eq!(stats.telemetry().output_callbacks, callbacks + 1);
+    assert_eq!(stats.telemetry().last_output_frames, 128);
+}
+
+#[test]
+fn stale_epoch_alignment_drops_are_counted() {
+    let (mut rx, mut mixer) = channels();
+    let stats = Stats::default();
+    assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+    rx.remove(1);
+    mixer.playback(&mut [0.0; 64], 1, &stats);
+    assert_eq!(
+        stats.telemetry().align_dropped_samples,
+        FRAME_SAMPLES as u32
+    );
+    assert_eq!(stats.telemetry().not_ready_samples, 0);
+}

@@ -9,7 +9,7 @@ use std::{
 
 use crate::{network::Telemetry, setup::Preferences};
 
-const NAMES: [&str; 7] = [
+const NAMES: [&str; 20] = [
     "remote_peers",
     "rtt_ms",
     "jitter_ms",
@@ -17,17 +17,41 @@ const NAMES: [&str; 7] = [
     "buffer_ms",
     "input_overflows",
     "output_underflows",
+    "input_callbacks",
+    "output_callbacks",
+    "not_ready_samples",
+    "align_dropped_samples",
+    "last_output_frames",
+    "late_dropped",
+    "late_dropped_far",
+    "plc_frames",
+    "skipped_frames",
+    "rx_push_dropped",
+    "resyncs",
+    "worker_max_gap_ms",
+    "rtt_max_ms",
 ];
+
+/// Actual CPAL stream configuration and the latest observed callback size.
+#[derive(Clone, Copy, Default)]
+pub struct AudioInfo {
+    pub input_channels: u16,
+    pub output_channels: u16,
+    pub input_sample_rate: u32,
+    pub output_sample_rate: u32,
+    pub last_output_frames: u32,
+}
 
 pub struct SessionLog {
     writer: BufWriter<File>,
     started: Instant,
+    header_pending: bool,
     // Exact nearest-rank p95 over the whole session, including missing-RTT handling.
-    values: [Vec<f64>; 7],
+    values: [Vec<f64>; 20],
 }
 
 impl SessionLog {
-    pub fn start(config: &Path, preferences: &Preferences) -> io::Result<Self> {
+    pub fn start(config: &Path, preferences: &Preferences, audio: AudioInfo) -> io::Result<Self> {
         let directory = config
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -64,18 +88,54 @@ impl SessionLog {
         )?;
         writeln!(
             writer,
-            "interval_ms=500; remote_peers excludes self; p95=nearest rank; missing RTT=N/A (excluded); xruns=cumulative counters; buffer excludes hardware/SPSC queues"
+            "input_channels={}\noutput_channels={}\ninput_sample_rate={}\noutput_sample_rate={}",
+            audio.input_channels,
+            audio.output_channels,
+            audio.input_sample_rate,
+            audio.output_sample_rate
         )?;
-        writeln!(writer, "elapsed_s\t{}", NAMES.join("\t"))?;
-        writer.flush()?;
-        Ok(Self {
+        let mut log = Self {
             writer,
             started: Instant::now(),
+            header_pending: true,
             values: std::array::from_fn(|_| Vec::new()),
-        })
+        };
+        // If connection precedes the first callback, finish the header at the first sample.
+        if audio.last_output_frames != 0 {
+            log.write_header(audio.last_output_frames)?;
+        }
+        log.writer.flush()?;
+        Ok(log)
+    }
+
+    fn write_header(&mut self, frames: u32) -> io::Result<()> {
+        if !self.header_pending {
+            return Ok(());
+        }
+        writeln!(
+            self.writer,
+            "last_output_frames={}",
+            if frames == 0 {
+                "N/A".into()
+            } else {
+                frames.to_string()
+            }
+        )?;
+        writeln!(
+            self.writer,
+            "interval_ms=500; remote_peers excludes self; p95=nearest rank; missing RTT=N/A (excluded); xruns=cumulative counters; buffer excludes hardware/SPSC queues"
+        )?;
+        writeln!(
+            self.writer,
+            "counters=cumulative since session start (audio u32 wraps; worker u32 saturates); input_callbacks/output_callbacks=driver calls; not_ready_samples=silent mono samples summed over active unready peers; align_dropped_samples=mono samples discarded including stale epochs; last_output_frames=last valid driver block (0=unobserved); late_dropped=all late packets including late_dropped_far (>=64 frames); plc_frames=Opus PLC decodes including holds, corrupt payload fallback and skipped missing frames; skipped_frames=cursor advances by skip/trim; rx_push_dropped=whole rejected chunks; resyncs=cursor reanchors and discontinuity resets (startup excluded); worker_max_gap_ms=peak tick gap in interval; rtt_max_ms=peak new Pong RTT in interval (N/A=no Pong); input_channels/output_channels=selected stream channels; sample rates=CPAL stream rates in Hz"
+        )?;
+        writeln!(self.writer, "elapsed_s\t{}", NAMES.join("\t"))?;
+        self.header_pending = false;
+        Ok(())
     }
 
     pub fn record(&mut self, peers: u32, metrics: Telemetry, xruns: [u32; 2]) -> io::Result<()> {
+        self.write_header(metrics.audio.last_output_frames)?;
         let row = [
             Some(f64::from(peers)),
             metrics.rtt_ms,
@@ -84,6 +144,19 @@ impl SessionLog {
             Some(metrics.buffer_ms),
             Some(f64::from(xruns[0])),
             Some(f64::from(xruns[1])),
+            Some(f64::from(metrics.audio.input_callbacks)),
+            Some(f64::from(metrics.audio.output_callbacks)),
+            Some(f64::from(metrics.audio.not_ready_samples)),
+            Some(f64::from(metrics.audio.align_dropped_samples)),
+            Some(f64::from(metrics.audio.last_output_frames)),
+            Some(f64::from(metrics.diagnostics.late_dropped)),
+            Some(f64::from(metrics.diagnostics.late_dropped_far)),
+            Some(f64::from(metrics.diagnostics.plc_frames)),
+            Some(f64::from(metrics.diagnostics.skipped_frames)),
+            Some(f64::from(metrics.diagnostics.rx_push_dropped)),
+            Some(f64::from(metrics.diagnostics.resyncs)),
+            Some(metrics.worker_max_gap_ms),
+            metrics.rtt_max_ms,
         ];
         write!(self.writer, "{:.3}", self.started.elapsed().as_secs_f64())?;
         for (values, value) in self.values.iter_mut().zip(row) {
@@ -99,6 +172,7 @@ impl SessionLog {
     }
 
     fn finish(&mut self) -> io::Result<()> {
+        self.write_header(0)?;
         writeln!(self.writer, "Summary\nmetric\tsamples\tmin\tavg\tp95\tmax")?;
         for (name, values) in NAMES.iter().zip(&mut self.values) {
             values.sort_unstable_by(f64::total_cmp);
