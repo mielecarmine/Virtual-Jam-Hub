@@ -11,6 +11,9 @@ const CAPACITY: usize = 64;
 const MAX_TARGET: usize = 16;
 const MAX_ADAPTIVE_TARGET: usize = 8;
 const LATE_THRESHOLD: u8 = 3;
+const RECOVERY_THRESHOLD: u8 = 8;
+// Never rewind more than one second of audio (400 x 2.5 ms).
+const MAX_RECOVERY_LAG: u32 = 400;
 const STABLE_WINDOW: Duration = Duration::from_secs(1);
 // Allow three queued chunks beyond the nominal network jitter target.
 const QUEUE_SLACK: usize = 3;
@@ -49,6 +52,8 @@ pub struct PeerJitterBuffer {
     stable_since: Instant,
     late_count: u8,
     last_late: Option<u32>,
+    recovery_last: Option<u32>,
+    recovery_count: u8,
     hold: bool,
     last: Chunk,
     decoder: Decoder,
@@ -79,6 +84,8 @@ impl PeerJitterBuffer {
             stable_since: now,
             late_count: 0,
             last_late: None,
+            recovery_last: None,
+            recovery_count: 0,
             hold: false,
             last: [0.0; FRAME_SAMPLES],
             decoder: Decoder::new(SAMPLE_RATE, Channels::Mono)?,
@@ -87,6 +94,8 @@ impl PeerJitterBuffer {
     }
 
     pub fn insert(&mut self, sequence: u32, chunk: &Encoded, now: Instant) -> opus::Result<()> {
+        // Network activity is independent of whether playout can use this packet.
+        self.last_received = now;
         let distance = sequence.wrapping_sub(self.next);
         if distance >= (1 << 31) {
             // Before startup, allow an earlier frame within the bounded reorder window.
@@ -94,6 +103,10 @@ impl PeerJitterBuffer {
                 self.next = sequence;
                 self.diagnostics.resyncs = self.diagnostics.resyncs.saturating_add(1);
             } else {
+                if self.recover_late(sequence, now)? {
+                    self.slots[sequence as usize % CAPACITY] = Some((sequence, *chunk));
+                    return Ok(());
+                }
                 self.diagnostics.late_dropped = self.diagnostics.late_dropped.saturating_add(1);
                 if self.next.wrapping_sub(sequence) >= WINDOW {
                     self.diagnostics.late_dropped_far =
@@ -137,12 +150,13 @@ impl PeerJitterBuffer {
             self.decoder.reset_state()?;
             self.ready_at = now + CHUNK_TIME * u32::try_from(self.target).unwrap_or(3);
         }
+        self.recovery_count = 0;
+        self.recovery_last = None;
         let slot = &mut self.slots[sequence as usize % CAPACITY];
         if slot.as_ref().is_some_and(|(seq, _)| *seq == sequence) {
             return Ok(());
         }
         *slot = Some((sequence, *chunk));
-        self.last_received = now;
         if now.duration_since(self.stable_since) >= STABLE_WINDOW {
             self.stable_since = now;
             self.late_count = 0;
@@ -153,6 +167,55 @@ impl PeerJitterBuffer {
             }
         }
         Ok(())
+    }
+
+    fn recover_late(&mut self, sequence: u32, now: Instant) -> opus::Result<bool> {
+        let lag = self.next.wrapping_sub(sequence);
+        let consecutive = self
+            .recovery_last
+            .is_some_and(|last| sequence == last.wrapping_add(1));
+        let advancing = self
+            .recovery_last
+            .is_none_or(|last| sequence != last && sequence.wrapping_sub(last) < (1 << 31));
+        if self.started
+            && lag <= MAX_RECOVERY_LAG
+            && self.slots.iter().all(Option::is_none)
+            && advancing
+        {
+            self.recovery_count = if consecutive {
+                self.recovery_count + 1
+            } else {
+                1
+            };
+        } else {
+            self.recovery_count = 0;
+        }
+        if advancing {
+            self.recovery_last = Some(sequence);
+        }
+        // Detection plus refill must fit in 20 ticks (50 ms), even at target=16.
+        let threshold = usize::from(RECOVERY_THRESHOLD).min(21 - self.target);
+        if usize::from(self.recovery_count) < threshold {
+            return Ok(false);
+        }
+        // Refill from this packet instead of spending the plateau chasing the sender.
+        // Short rewinds preserve Opus history, just like short forward trims.
+        if lag >= WINDOW {
+            self.last.fill(0.0);
+            self.decoder.reset_state()?;
+        }
+        self.next = sequence;
+        self.started = false;
+        self.pending_playout = 0;
+        self.hold = false;
+        self.late_count = 0;
+        self.last_late = None;
+        self.recovery_count = 0;
+        self.recovery_last = None;
+        self.stable_since = now;
+        self.ready_at = now + CHUNK_TIME * u32::try_from(self.target).unwrap_or(3);
+        self.diagnostics.resyncs = self.diagnostics.resyncs.saturating_add(1);
+        Ok(true)
     }
 
     #[cfg(test)]

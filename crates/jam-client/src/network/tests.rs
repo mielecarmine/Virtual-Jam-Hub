@@ -1,6 +1,103 @@
 use super::*;
 use rtrb::RingBuffer;
 
+#[test]
+fn latency_plateaus_keep_peer_and_arrival_history_alive_and_restore_audio() {
+    for delay in [20, 80, 240] {
+        for nominal in [3, 8, 16] {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+            network.settings.target_chunks = nominal;
+            let start = network.started;
+            let (mut speaker, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
+            let mut enc = codec::encoder().unwrap();
+            let mut packets: Vec<_> = (0..4000)
+                .map(|sequence| {
+                    let mut bytes = [0; PACKET_SIZE];
+                    AudioHeader::new(2, STREAM_PRIMARY, sequence, 0)
+                        .to_bytes(&mut bytes)
+                        .unwrap();
+                    bytes[AUDIO_HEADER_SIZE..]
+                        .copy_from_slice(&crate::codec::tests::encode(&mut enc, 0.5));
+                    let due = sequence
+                        + if (400..3200).contains(&sequence) {
+                            delay
+                        } else {
+                            0
+                        };
+                    (due, sequence, bytes)
+                })
+                .collect();
+            packets.sort_by_key(|&(due, sequence, _)| std::cmp::Reverse((due, sequence)));
+            let mut recovered = None;
+            for tick in 0..4000 {
+                let now = start + CHUNK_TIME * tick;
+                while packets.last().is_some_and(|&(due, _, _)| due <= tick) {
+                    let (_, _, bytes) = packets.pop().unwrap();
+                    network.incoming(&bytes, 1, now);
+                }
+                network.playback(&mut speaker, now).unwrap();
+                let peer = &network.peers[&2];
+                let audible = std::iter::from_fn(|| mixer.rings[1].pop().ok())
+                    .any(|sample| sample.value.abs() > 0.1);
+                while mixer.rings[1].pop().is_ok() {}
+                if tick >= 400 + delay && audible {
+                    recovered.get_or_insert(tick);
+                }
+                if tick > 400 + delay + 40 && tick < 3200 {
+                    assert!(audible, "delay={delay}, target={nominal}, tick={tick}");
+                    assert!(peer.buffered_ms() > 0.0);
+                }
+                if tick > 3240 {
+                    assert!(peer.buffered_ms() <= (nominal + 4) as f64 * 2.5);
+                }
+                if tick == 3199 {
+                    // A false five-second retirement would reset these cumulative counts.
+                    assert!(network.arrivals[&2].expected > 2800);
+                }
+            }
+            assert!(recovered.unwrap() - (400 + delay) <= 20);
+            assert_eq!(network.peers[&2].target_chunks(), nominal);
+            network
+                .playback(&mut speaker, start + Duration::from_secs(16))
+                .unwrap();
+            assert!(network.peers.is_empty());
+            assert!(network.arrivals.is_empty());
+        }
+    }
+}
+
+#[test]
+fn unusable_late_packets_and_duplicates_prevent_false_peer_timeout() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+    let start = network.started;
+    let (mut speaker, mut mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
+    let mut bytes = packet(2, 0.5);
+    AudioHeader::new(2, STREAM_PRIMARY, 1000, 0)
+        .to_bytes(&mut bytes)
+        .unwrap();
+    network.incoming(&bytes, 1, start);
+    network.playback(&mut speaker, start).unwrap();
+    // These cannot trigger recovery: they repeat a sequence more than one second late.
+    AudioHeader::new(2, STREAM_PRIMARY, 0, 0)
+        .to_bytes(&mut bytes)
+        .unwrap();
+    for tick in 1..=3200 {
+        let now = start + CHUNK_TIME * tick;
+        network.incoming(&bytes, 1, now);
+        network.playback(&mut speaker, now).unwrap();
+        assert_eq!(network.peers[&2].last_received, now);
+        assert!(network.arrivals.contains_key(&2));
+        while mixer.rings[1].pop().is_ok() {}
+    }
+    network
+        .playback(&mut speaker, start + Duration::from_secs(13))
+        .unwrap();
+    assert!(network.peers.is_empty());
+    assert!(network.arrivals.is_empty());
+}
+
 fn packet(id: u8, value: f32) -> [u8; PACKET_SIZE] {
     let mut bytes = [0; PACKET_SIZE];
     AudioHeader::new(id, STREAM_PRIMARY, 0, 0)

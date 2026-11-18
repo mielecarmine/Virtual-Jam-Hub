@@ -11,6 +11,150 @@ fn decode(decoder: &mut Decoder, input: &[u8]) -> Chunk {
 }
 
 #[test]
+fn late_and_duplicate_packets_refresh_network_activity() {
+    let start = Instant::now();
+    let frame = encode(&mut encoder().unwrap(), 0.5);
+    let mut buffer = PeerJitterBuffer::new(1000, start, 3).unwrap();
+    buffer.insert(1000, &frame, start).unwrap();
+    let later = start + Duration::from_secs(6);
+    buffer.insert(1000, &frame, later).unwrap();
+    assert_eq!(buffer.last_received, later);
+    buffer.pop(later).unwrap();
+    for (index, sequence) in [1000, 0].into_iter().enumerate() {
+        let later = later + CHUNK_TIME * u32::try_from(index + 1).unwrap();
+        buffer.insert(sequence, &frame, later).unwrap();
+        assert_eq!(buffer.last_received, later);
+    }
+}
+
+#[test]
+fn recovery_preserves_short_jump_history_and_resets_large_jumps_across_wrap() {
+    for lag in [20, WINDOW - 1, WINDOW, 240, MAX_RECOVERY_LAG] {
+        let start = Instant::now();
+        let mut buffer = PeerJitterBuffer::new(0, start, MAX_ADAPTIVE_TARGET).unwrap();
+        let mut enc = encoder().unwrap();
+        let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
+        for sequence in 0..20 {
+            let frame = encode(&mut enc, 0.5);
+            buffer.insert(sequence, &frame, start).unwrap();
+            assert_eq!(
+                buffer.pop(buffer.ready_at).unwrap().unwrap(),
+                decode(&mut reference, &frame)
+            );
+        }
+        buffer.next = 2; // Exercise a rewind across u32::MAX.
+        let sequence = buffer.next.wrapping_sub(lag);
+        let frame = encode(&mut enc, 0.5);
+        for offset in 0..u32::from(RECOVERY_THRESHOLD) {
+            let now = start + CHUNK_TIME * (20 + offset);
+            buffer
+                .insert(sequence.wrapping_add(offset), &frame, now)
+                .unwrap();
+            if offset + 1 < u32::from(RECOVERY_THRESHOLD) {
+                assert_eq!(
+                    buffer.pop(now).unwrap().unwrap(),
+                    decode(&mut reference, &[])
+                );
+            }
+        }
+        assert_eq!(buffer.diagnostics.resyncs, 1);
+        assert_eq!(buffer.buffered_ms(), 2.5);
+        if lag >= WINDOW {
+            reference.reset_state().unwrap();
+        }
+        assert_eq!(
+            buffer.pop(buffer.ready_at).unwrap().unwrap(),
+            decode(&mut reference, &frame)
+        );
+    }
+}
+
+#[test]
+fn recovery_rejects_replays_excessive_lag_and_nonempty_buffers() {
+    for mode in 0..4 {
+        let start = Instant::now();
+        let mut buffer = PeerJitterBuffer::new(1000, start, 8).unwrap();
+        buffer.started = true;
+        let frame = encode(&mut encoder().unwrap(), 0.5);
+        if mode == 3 {
+            buffer.insert(1001, &frame, start).unwrap();
+        }
+        for offset in 0..32 {
+            let sequence = match mode {
+                0 => 900,
+                1 => 900 - offset,
+                2 => 500 + offset,
+                _ => 900 + offset,
+            };
+            buffer
+                .insert(sequence, &frame, start + CHUNK_TIME * offset)
+                .unwrap();
+        }
+        assert_eq!(buffer.next, 1000);
+        assert_eq!(buffer.diagnostics.resyncs, 0);
+    }
+}
+
+#[test]
+fn latency_plateaus_recover_within_fifty_ms_and_release_backlog() {
+    for delay in [20, 80, 240] {
+        // 50, 200 and 600 ms.
+        for (nominal, target) in [(3, 3), (3, 8), (8, 8), (16, 16)] {
+            let start = Instant::now();
+            let mut buffer = PeerJitterBuffer::new(0, start, nominal).unwrap();
+            buffer.target = target;
+            let mut enc = encoder().unwrap();
+            let mut pending: Vec<_> = (0..4000)
+                .map(|sequence| {
+                    let due = sequence
+                        + if (400..3200).contains(&sequence) {
+                            delay
+                        } else {
+                            0
+                        };
+                    (due, sequence, encode(&mut enc, 0.5))
+                })
+                .collect();
+            pending.sort_by_key(|&(due, sequence, _)| std::cmp::Reverse((due, sequence)));
+            let mut recovered = None;
+            for tick in 0..4000 {
+                let now = start + CHUNK_TIME * tick;
+                while pending.last().is_some_and(|&(due, _, _)| due <= tick) {
+                    let (_, sequence, frame) = pending.pop().unwrap();
+                    buffer.insert(sequence, &frame, now).unwrap();
+                    assert_eq!(buffer.last_received, now);
+                }
+                let plc = buffer.diagnostics.plc_frames;
+                for _ in 0..buffer.playout_frames(now, now, 1).unwrap() {
+                    let audio = buffer.pop(now).unwrap().unwrap();
+                    if tick >= 400 + delay && buffer.diagnostics.plc_frames == plc {
+                        recovered.get_or_insert(tick);
+                        if tick > 400 + delay + 40 && tick < 3200 {
+                            assert!(audio.iter().any(|sample| sample.abs() > 0.1));
+                        }
+                    }
+                }
+                if tick > 400 + delay + 40 && tick < 3200 {
+                    assert_eq!(
+                        buffer.diagnostics.plc_frames, plc,
+                        "delay={delay}, tick={tick}"
+                    );
+                    assert!(buffer.buffered_ms() > 0.0);
+                }
+                if tick > 3240 {
+                    assert!(buffer.buffered_ms() <= (buffer.target + QUEUE_SLACK + 1) as f64 * 2.5);
+                }
+            }
+            assert!(
+                recovered.unwrap() - (400 + delay) <= 20,
+                "delay={delay}, target={target}"
+            );
+            assert_eq!(buffer.target, nominal);
+        }
+    }
+}
+
+#[test]
 fn reorders_compressed_packets_before_decoding_and_rejects_duplicates() {
     let now = Instant::now();
     let mut encoder = encoder().unwrap();
@@ -292,10 +436,14 @@ fn stable_stream_returns_to_nominal_after_late_packets() {
     let ready = buffer.ready_at;
     buffer.insert(0, &frame, start).unwrap();
     buffer.pop(ready).unwrap();
-    // Sustained real lateness (three distinct missed frames per increase).
+    // Keep playable future audio queued to exercise gradual adaptation, independently
+    // of the empty-buffer recovery covered by the latency plateau tests.
     let mut sequence = 1;
     for _ in 0..20 {
         for _ in 0..LATE_THRESHOLD {
+            buffer
+                .insert(buffer.next.wrapping_add(10), &frame, ready)
+                .unwrap();
             buffer.pop(ready).unwrap();
             buffer.insert(sequence, &frame, ready).unwrap();
             sequence += 1;
