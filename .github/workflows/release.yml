@@ -15,12 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            platform: linux-amd64
           - os: windows-2022
             platform: windows-x64
-          - os: macos-15-intel
-            platform: macos-x86_64
           - os: macos-15
             platform: macos-arm64
     runs-on: ${{ matrix.os }}
@@ -120,7 +116,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           cd dist
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 2
+          test -f "Virtual-Jam-${TAG}-windows-x64-setup.exe"
+          test -f "Virtual-Jam-${TAG}-macos-arm64.pkg"
           sha256sum * > SHA256SUMS.txt
           cd ..
           gh release create "$TAG" dist/* --verify-tag --prerelease --title "Virtual Jam $TAG" --notes-file packaging/RELEASE-NOTES.md
