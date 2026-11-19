@@ -688,6 +688,46 @@ Le statistiche esatte conservano i campioni in memoria per la durata della sessi
 Un errore di apertura/scrittura viene segnalato senza interrompere l'audio;
 un errore durante la finalizzazione viene riportato su stderr.
 
+### Micro-underflow e riaggancio del mixer — JAM-30
+
+Ogni peer conserva uno stato di continuità indipendente. Una lettura mancante
+sfuma l'ultimo campione verso zero in 48 campioni (1 ms a 48 kHz); il ritorno
+dell'audio interpola dall'ultimo valore emesso al segnale corrente per 48 campioni.
+Le rampe continuano attraverso i confini delle callback. Dopo meno di 120 campioni
+mancanti consecutivi (2.5 ms) il peer resta pronto e può riprendere alla prossima
+lettura disponibile, senza attendere nuovamente 904–1096 campioni di prefill.
+I campioni mancanti costituiscono un debito: al ritorno vengono scartati altrettanti
+campioni dal ring prima di consumare audio valido, evitando di accumulare latenza.
+Questi scarti incrementano `align_dropped_samples`.
+
+Dopo 120 letture mancanti consecutive si ricostruisce la riserva completa;
+`output_underflows` conta le letture mancate durante lo stato pronto,
+`not_ready_samples` conta i campioni in attesa del prefill. Il debito viene azzerato
+al riaggancio completo; il limite di coda di `align` resta attivo. Rimozione/riuso
+di un ID azzera anche lo stato delle rampe, senza propagare audio del vecchio peer.
+Il primo avvio mantiene il prefill esistente. Mute, solo e gain si applicano anche
+all'audio di raccordo. Lo stato è in array fissi, senza heap, lock o syscall.
+
+Verifica dell'avvio a 256 frame: nel log macOS
+`telemetry-1795015098111620000-2011-0.txt`, a 0.345 s sono già presenti
+`resyncs=1`, `late_dropped=62`, `plc_frames=66`, ma `output_underflows=0` e
+`align_dropped_samples=0`; a 0.845 s `late_dropped_far=34` mentre gli underflow
+restano zero. Nel log Windows `telemetry-1795015097159872200-21532-0.txt`
+`resyncs=1` compare a 0.975 s e `late_dropped_far=34` a 1.975 s, sempre con
+underflow e scarti del mixer a zero. I contatori del jitter buffer non sono prova di un underflow
+del mixer: `late_dropped_far` richiede un pacchetto almeno 64 sequenze (160 ms)
+dietro al cursore; `resyncs` può contare riordino iniziale, salti di sequenza o
+riancoraggi. I log aggregati non identificano la causa esatta dei 34 scarti.
+
+Il test `startup_at_256_frames_does_not_create_far_late_packets_or_resyncs`
+simula due secondi di arrivi regolari, playout del worker e callback da 256 frame
+con quattro fasi iniziali: underflow, scarti lontani e resync restano zero.
+Non riproduce le condizioni di rete/driver dei log: per la verifica hardware
+confrontare Windows/ASIO e macOS/CoreAudio a 256 frame, raccogliendo i log fin
+dall'aggancio e ascoltando le transizioni. I test del mixer coprono inoltre
+micro-underflow ripetuti, rampe tra callback, refill per peer e assenza di
+accumulo di latenza; `audio::tests::allocation` copre i nuovi percorsi.
+
 ### Priorità del controller e verifica degli stalli — JAM-29
 
 Il thread `jam-controller` richiede MMCSS `Pro Audio` con `AVRT_PRIORITY_HIGH`

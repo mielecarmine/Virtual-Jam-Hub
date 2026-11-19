@@ -2,6 +2,48 @@ use super::*;
 use rtrb::RingBuffer;
 
 #[test]
+fn startup_at_256_frames_does_not_create_far_late_packets_or_resyncs() {
+    for phase in [0, 1, 119, 255] {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut network = Network::connect(server.local_addr().unwrap(), "test").unwrap();
+        let start = network.started;
+        let (mut speaker, mut mixer) = crate::mixer::channels(256);
+        let stats = crate::audio::Stats::default();
+        let mut output = [0.0_f32; 256];
+        let mut bytes = packet(2, 0.5);
+        for sample in 0_u32..96_000 {
+            let now = start + Duration::from_nanos(u64::from(sample) * 1_000_000_000 / 48_000);
+            if sample % 120 == 0 {
+                AudioHeader::new(2, STREAM_PRIMARY, sample / 120, 0)
+                    .to_bytes(&mut bytes)
+                    .unwrap();
+                network.incoming(&bytes, 1, now);
+            }
+            if sample % 12 == 0 {
+                network.playback(&mut speaker, now).unwrap();
+            }
+            if sample >= phase && (sample - phase) % 256 == 0 {
+                mixer.playback(&mut output, 1, &stats);
+            }
+        }
+        assert!(
+            stats
+                .playback_started
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert_eq!(
+            stats
+                .output_underflows
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let diagnostics = network.peers[&2].diagnostics;
+        assert_eq!(diagnostics.late_dropped_far, 0, "phase={phase}");
+        assert_eq!(diagnostics.resyncs, 0, "phase={phase}");
+    }
+}
+
+#[test]
 fn latency_plateaus_keep_peer_and_arrival_history_alive_and_restore_audio() {
     for delay in [20, 80, 240] {
         for nominal in [3, 8, 16] {

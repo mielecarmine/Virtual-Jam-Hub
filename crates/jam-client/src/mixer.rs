@@ -13,6 +13,46 @@ use crate::{audio::Stats, codec::FRAME_SAMPLES};
 // 15 ms scheduling reserve plus one production interval (2.5 ms) at 48 kHz.
 const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 7;
 
+// 1 ms at 48 kHz; tolerate one Opus interval before rebuilding the reserve.
+const FADE_SAMPLES: u16 = 48;
+const STARVATION_SAMPLES: usize = FRAME_SAMPLES;
+
+#[derive(Clone, Copy, Default)]
+struct Continuity {
+    last: f32,
+    missing: usize,
+    debt: usize,
+    offset: f32,
+    fade_in: u16,
+}
+
+impl Continuity {
+    fn render(&mut self, sample: Option<f32>) -> f32 {
+        let value = if let Some(value) = sample {
+            let value = if value.is_finite() { value } else { 0.0 };
+            if self.missing > 0 {
+                self.offset = self.last - value;
+                self.fade_in = FADE_SAMPLES;
+                self.missing = 0;
+            }
+            self.fade_in = self.fade_in.saturating_sub(1);
+            value + self.offset * f32::from(self.fade_in) / f32::from(FADE_SAMPLES)
+        } else {
+            let remaining = usize::from(FADE_SAMPLES).saturating_sub(self.missing);
+            self.missing = self.missing.saturating_add(1).min(STARVATION_SAMPLES);
+            self.fade_in = 0;
+            if remaining > 0 {
+                self.last * f32::from(u16::try_from(remaining - 1).unwrap_or(0))
+                    / f32::from(u16::try_from(remaining).unwrap_or(FADE_SAMPLES))
+            } else {
+                0.0
+            }
+        };
+        self.last = value;
+        value
+    }
+}
+
 fn queue_capacity(frames: usize) -> usize {
     (frames + RX_TARGET_SAMPLES).div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES + FRAME_SAMPLES
 }
@@ -58,6 +98,7 @@ pub struct Mixer {
     local: Option<crate::monitor::Playback>,
     epochs: [u32; MAX_PEERS],
     ready: [bool; MAX_PEERS],
+    continuity: [Continuity; MAX_PEERS],
 }
 
 pub fn channels(frames: usize) -> (RxChannels, Mixer) {
@@ -85,6 +126,7 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
             local: None,
             epochs: [0; MAX_PEERS],
             ready: [false; MAX_PEERS],
+            continuity: [Continuity::default(); MAX_PEERS],
         },
     )
 }
@@ -152,6 +194,7 @@ impl Mixer {
             if self.epochs[index] != epoch {
                 self.epochs[index] = epoch;
                 self.ready[index] = false;
+                self.continuity[index] = Continuity::default();
             }
             // Old generations must not count towards a new peer's prefill.
             for _ in 0..ring.slots() {
@@ -200,7 +243,6 @@ impl Mixer {
             local.align(data.len() / channels);
         }
         self.align(data.len() / channels, stats);
-        let mut starved = [false; MAX_PEERS];
         let mut peaks = [0.0_f32; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
             let solo = (self.local.is_some() && self.local_control.solo.load(Ordering::Relaxed))
@@ -233,15 +275,22 @@ impl Mixer {
                 .enumerate()
             {
                 let epoch = control.epoch.load(Ordering::Relaxed);
-                if !self.ready[index] || epoch != self.epochs[index] || epoch % 2 == 0 {
-                    if epoch % 2 != 0 {
-                        stats.not_ready_samples.fetch_add(1, Ordering::Relaxed);
-                    }
+                if epoch != self.epochs[index] || epoch % 2 == 0 {
                     continue;
+                }
+                let continuity = &mut self.continuity[index];
+                // Missing output advanced wall time, but not the source cursor. Retire
+                // that debt before resuming so repeated glitches cannot add latency.
+                if self.ready[index] {
+                    for _ in 0..continuity.debt.min(ring.slots()) {
+                        let _ = ring.pop();
+                        continuity.debt -= 1;
+                        stats.align_dropped_samples.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 // Bounded by the queue capacity, including stale samples after a disconnect.
                 let mut sample = None;
-                for _ in 0..ring.slots() {
+                for _ in 0..if self.ready[index] { ring.slots() } else { 0 } {
                     if let Ok(queued) = ring.pop() {
                         if queued.epoch == epoch {
                             sample = Some(queued.value);
@@ -249,15 +298,26 @@ impl Mixer {
                         }
                     }
                 }
-                let value = sample.unwrap_or_else(|| {
-                    starved[index] = true;
+                if !self.ready[index] {
+                    stats.not_ready_samples.fetch_add(1, Ordering::Relaxed);
+                    if continuity.missing == 0 {
+                        continue;
+                    }
+                } else if sample.is_none() {
+                    continuity.debt = continuity.debt.saturating_add(1);
                     stats.output_underflows.fetch_add(1, Ordering::Relaxed);
-                    0.0
-                });
+                }
+                let value = continuity.render(sample);
+                if self.ready[index] && continuity.missing >= STARVATION_SAMPLES {
+                    self.ready[index] = false;
+                    continuity.debt = 0;
+                }
                 if value.is_finite() {
                     *peak = peak.max(value.abs());
                 }
-                stats.playback_started.store(true, Ordering::Relaxed);
+                if sample.is_some() {
+                    stats.playback_started.store(true, Ordering::Relaxed);
+                }
                 let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
                 if gain.is_finite()
                     && !control.mute.load(Ordering::Relaxed)
@@ -270,11 +330,6 @@ impl Mixer {
             #[allow(clippy::cast_possible_truncation)]
             let output = sum.tanh() as f32;
             frame.fill(T::from_sample(output));
-        }
-        for (ready, starved) in self.ready.iter_mut().zip(starved) {
-            if starved {
-                *ready = false;
-            }
         }
         for (control, peak) in self.controls.iter().zip(peaks) {
             control.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
