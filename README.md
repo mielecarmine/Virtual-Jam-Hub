@@ -808,3 +808,38 @@ La verifica hardware richiede due postazioni Windows ASIO e macOS CoreAudio:
    frame saltati e picchi di scheduling/rete insieme ai log di entrambe le postazioni.
 
 Questa prova non è sostituita dai test su clock simulato o da una sessione localhost.
+
+### Clock e metronomo di stanza — JAM-32
+
+Il controllo UDP include `MetronomeUpdate` (tipo `0x08`, 8 byte) e
+`MetronomeState` (tipo `0x09`, 16 byte), entrambi little-endian e senza
+allocazioni durante la codifica e la decodifica. La configurazione contiene
+`enabled` (0/1), `bpm` (30–300), `beats_per_bar` (1–16) e `leader_peer_id`
+(0 = clock di stanza; 1–8 = peer attivo). Il default è spento, 120 BPM, 4/4,
+senza leader. Lo stato aggiunge `anchor_server_timestamp_us`, il beat zero
+nel clock monotono del server.
+
+Ogni membro può modificare il metronomo. Il server assegna una nuova ancora
+all'attivazione e al cambio BPM; retry identici, spegnimento, cambio metrica
+o leader conservano l'ancora. Invia lo stato a tutti i membri dopo ogni comando
+valido e al nuovo peer dopo il join. Uscita e timeout del leader ripristinano
+automaticamente il clock di stanza e notificano i superstiti, conservando la fase.
+I client ignorano i comandi come conferme: lo stato locale cambia solo alla
+ricezione dello stato autorevole.
+
+`Network::clock_offset_us()` restituisce server meno clock locale (microsecondi
+dall'avvio della connessione), inizialmente `None`. Per ogni Pong corrispondente
+al Ping pendente, il filtro calcola `server_timestamp_us - (invio_locale + RTT/2)`
+e sceglie il campione a RTT minimo degli ultimi 32 Pong validi, preferendo il
+più recente a parità di RTT. La finestra mobile elimina gradualmente i vecchi
+campioni per seguire variazioni di percorso e deriva del clock. Spike asimmetrici
+vengono filtrati quando la finestra contiene campioni con RTT inferiore;
+l'asimmetria permanente del percorso resta un limite della stima.
+`server_timestamp_us(Instant)` converte nel clock di stanza;
+`metronome_state()` legge lo stato e `update_metronome(config)` invia un comando
+dopo il join. Queste API preparano sintetizzatore e GUI dei ticket JAM-33/JAM-34:
+JAM-32 non genera audio del click e non lo trasmette in rete.
+
+I test coprono layout e limiti dei nuovi messaggi, broadcast, join, reset del
+leader e riuso degli ID, oltre a offset positivi/negativi, jitter asimmetrico,
+Pong duplicati/non corrispondenti e ricambio della finestra del filtro.

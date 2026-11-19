@@ -41,6 +41,10 @@ impl Room {
                     ControlMessage::PeerListUpdate { peers } if peers.len() == index + 1
                 ));
             }
+            assert!(matches!(
+                receive_control(clients.last().unwrap()),
+                ControlMessage::MetronomeState { .. }
+            ));
         }
         Self { server, clients }
     }
