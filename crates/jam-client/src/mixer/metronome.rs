@@ -16,6 +16,8 @@ pub struct MetronomeControls {
     pub mute: AtomicBool,
     /// Zero-based beat within the bar, including while locally muted.
     pub current_beat: AtomicU32,
+    /// Positive follower playout delay, published by the network worker in samples.
+    pub phase_delay_samples: AtomicU32,
     // Only RxChannels publishes. SeqCst gives the bounded reader a coherent snapshot;
     // an interrupted writer leaves the previous snapshot active, never a spinning callback.
     version: AtomicU32,
@@ -30,6 +32,7 @@ impl Default for MetronomeControls {
             gain: AtomicU32::new(0.5_f32.to_bits()),
             mute: AtomicBool::new(false),
             current_beat: AtomicU32::new(0),
+            phase_delay_samples: AtomicU32::new(0),
             version: AtomicU32::new(0),
             config: AtomicU32::new(pack(MetronomeConfig::default())),
             anchor_sample: AtomicU64::new(0),
@@ -103,6 +106,7 @@ pub(super) struct Metronome {
     target_gain: f64,
     gain_step: f64,
     ramp: u32,
+    phase_delay_samples: u32,
 }
 
 impl Metronome {
@@ -121,10 +125,12 @@ impl Metronome {
             target_gain: 0.5,
             gain_step: 0.0,
             ramp: 0,
+            phase_delay_samples: 0,
         }
     }
 
     pub(super) fn begin_block(&mut self) {
+        self.phase_delay_samples = self.controls.phase_delay_samples.load(Ordering::Relaxed);
         if let Some(snapshot) = self.controls.snapshot() {
             self.snapshot = snapshot;
         }
@@ -142,7 +148,9 @@ impl Metronome {
     }
 
     pub(super) fn next_sample(&mut self) -> f64 {
-        let elapsed = i128::from(self.cursor) - i128::from(self.snapshot.anchor);
+        let elapsed = i128::from(self.cursor)
+            - i128::from(self.snapshot.anchor)
+            - i128::from(self.phase_delay_samples);
         let bpm = u64::from((self.snapshot.config >> 1) & 0xffff);
         let beats = u64::from(self.snapshot.config >> 17);
         if self.snapshot.config & 1 != 0 && elapsed >= 0 {
@@ -190,6 +198,84 @@ impl Metronome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positive_follower_offset_delays_click_and_beat_while_leader_stays_nominal() {
+        let config = MetronomeConfig {
+            enabled: true,
+            bpm: 300,
+            beats_per_bar: 3,
+            leader_peer_id: 1,
+        };
+        let (mut leader, _) = crate::mixer::channels(128);
+        let (mut follower, _) = crate::mixer::channels(128);
+        leader.sync_metronome(config, 0);
+        follower.sync_metronome(config, 0);
+        follower
+            .metronome
+            .phase_delay_samples
+            .store(1440, Ordering::Relaxed);
+        let mut nominal = Metronome::new(Arc::clone(&leader.metronome));
+        let mut delayed = Metronome::new(Arc::clone(&follower.metronome));
+        nominal.begin_block();
+        delayed.begin_block();
+        let mut reference = Vec::new();
+        for index in 0..30_340 {
+            reference.push(nominal.next_sample());
+            let actual = delayed.next_sample();
+            if index < 1440 {
+                assert_eq!(actual, 0.0);
+            } else {
+                assert_eq!(actual, reference[index - 1440]);
+                assert_eq!(
+                    follower.metronome.current_beat.load(Ordering::Relaxed),
+                    u32::try_from((index - 1440) / 9600 % 3).unwrap()
+                );
+            }
+        }
+        // Removing a leader offset preserves an in-flight voice without a discontinuity.
+        follower
+            .metronome
+            .phase_delay_samples
+            .store(0, Ordering::Relaxed);
+        delayed.begin_block();
+        assert_eq!(delayed.next_sample(), reference[28_900]);
+    }
+
+    #[test]
+    fn absolute_room_phase_matches_across_different_local_clock_and_sample_epochs() {
+        let config = MetronomeConfig {
+            enabled: true,
+            bpm: 137,
+            ..MetronomeConfig::default()
+        };
+        let (mut first, _) = crate::mixer::channels(64);
+        let (mut second, _) = crate::mixer::channels(256);
+        first
+            .metronome
+            .rendered_samples
+            .store(48_000, Ordering::Relaxed);
+        second
+            .metronome
+            .rendered_samples
+            .store(240_000, Ordering::Relaxed);
+        // Both clock mappings report the same room time despite different callback cursors.
+        first.sync_metronome(config, 2_000_000);
+        second.sync_metronome(config, 2_000_000);
+        let mut a = Metronome::new(Arc::clone(&first.metronome));
+        let mut b = Metronome::new(Arc::clone(&second.metronome));
+        a.cursor = 48_000;
+        b.cursor = 240_000;
+        a.begin_block();
+        b.begin_block();
+        for _ in 0..100_000 {
+            assert_eq!(a.next_sample(), b.next_sample());
+            assert_eq!(
+                first.metronome.current_beat.load(Ordering::Relaxed),
+                second.metronome.current_beat.load(Ordering::Relaxed)
+            );
+        }
+    }
 
     #[test]
     fn interrupted_publication_keeps_rendering_previous_snapshot_without_waiting() {

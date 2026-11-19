@@ -190,6 +190,9 @@ fn metronome_clicks_reconfiguration_and_local_controls_do_not_allocate() {
                 0,
             );
             for block in 0..400 {
+                rx.metronome
+                    .phase_delay_samples
+                    .store((block % 3) * 1440, Ordering::Relaxed);
                 rx.metronome.mute.store(block % 4 == 0, Ordering::Relaxed);
                 rx.metronome
                     .gain

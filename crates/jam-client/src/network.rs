@@ -401,8 +401,8 @@ impl Network {
                 self.incoming(bytes, id, now);
             }
         }
-        self.sync_metronome(speaker, now);
         self.playback(speaker, now)?;
+        self.sync_metronome(speaker, now);
         self.publish_telemetry(now);
         let Some(id) = self.peer_id else {
             if now.duration_since(self.started) >= SERVER_TIMEOUT {
@@ -455,7 +455,36 @@ impl Network {
         self.metronome
     }
 
+    pub fn local_peer_id(&self) -> Option<u8> {
+        self.peer_id
+    }
+
+    /// Server RTT / 2 is a transit proxy: the protocol does not measure the leader's
+    /// uplink or hardware. Use only the leader's jitter queue, never the room maximum.
+    fn leader_phase_delay_samples(&self, config: MetronomeConfig) -> u32 {
+        if config.leader_peer_id == 0 || self.peer_id.is_none_or(|id| id == config.leader_peer_id) {
+            return 0;
+        }
+        let network_ms = self.rtt.map_or(0.0, |(ms, _)| ms / 2.0);
+        let jitter_ms = self
+            .peers
+            .get(&config.leader_peer_id)
+            .map_or(0.0, PeerJitterBuffer::buffered_ms);
+        // Bounded by the RTT timeout and the fixed jitter-buffer capacity.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let transit_samples =
+            ((network_ms + jitter_ms) * f64::from(SAMPLE_RATE) / 1000.0).round() as u32;
+        transit_samples.saturating_add(u32::try_from(crate::mixer::RX_TARGET_SAMPLES).unwrap_or(0))
+    }
+
     fn sync_metronome(&mut self, speaker: &mut RxChannels, now: Instant) {
+        let delay = self
+            .metronome_state()
+            .map_or(0, |state| self.leader_phase_delay_samples(state.config));
+        speaker
+            .metronome
+            .phase_delay_samples
+            .store(delay, Ordering::Relaxed);
         let (Some(state), Some(offset), Some(server_us)) = (
             self.metronome_state(),
             self.clock_offset_us(),
@@ -478,7 +507,6 @@ impl Network {
     }
 
     /// Sends a room configuration command; local state changes on server confirmation.
-    #[allow(dead_code)] // Command API for the JAM-34 GUI.
     pub fn update_metronome(&self, config: MetronomeConfig) -> io::Result<()> {
         if self.peer_id.is_none() {
             return Err(io::Error::new(
