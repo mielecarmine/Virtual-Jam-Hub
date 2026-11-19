@@ -1,10 +1,10 @@
-//! File telemetry for prerelease GUI sessions. Called only by jam-controller.
+//! File telemetry owned exclusively by the dedicated telemetry thread.
 
 use std::{
     fs::{File, OpenOptions},
     io::{self, BufWriter, Write},
     path::Path,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{network::Telemetry, setup::Preferences};
@@ -44,7 +44,8 @@ pub struct AudioInfo {
 
 pub struct SessionLog {
     writer: BufWriter<File>,
-    started: Instant,
+    #[cfg(test)]
+    started: std::time::Instant,
     header_pending: bool,
     // Exact nearest-rank p95 over the whole session, including missing-RTT handling.
     values: [Vec<f64>; 20],
@@ -96,7 +97,8 @@ impl SessionLog {
         )?;
         let mut log = Self {
             writer,
-            started: Instant::now(),
+            #[cfg(test)]
+            started: std::time::Instant::now(),
             header_pending: true,
             values: std::array::from_fn(|_| Vec::new()),
         };
@@ -134,7 +136,18 @@ impl SessionLog {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn record(&mut self, peers: u32, metrics: Telemetry, xruns: [u32; 2]) -> io::Result<()> {
+        self.record_at(self.started.elapsed().as_secs_f64(), peers, metrics, xruns)
+    }
+
+    pub(super) fn record_at(
+        &mut self,
+        elapsed: f64,
+        peers: u32,
+        metrics: Telemetry,
+        xruns: [u32; 2],
+    ) -> io::Result<()> {
         self.write_header(metrics.audio.last_output_frames)?;
         let row = [
             Some(f64::from(peers)),
@@ -158,7 +171,7 @@ impl SessionLog {
             Some(metrics.worker_max_gap_ms),
             metrics.rtt_max_ms,
         ];
-        write!(self.writer, "{:.3}", self.started.elapsed().as_secs_f64())?;
+        write!(self.writer, "{elapsed:.3}")?;
         for (values, value) in self.values.iter_mut().zip(row) {
             if let Some(value) = value.filter(|value| value.is_finite()) {
                 values.push(value);
@@ -196,6 +209,9 @@ impl SessionLog {
         self.writer.flush()
     }
 }
+
+mod asynchronous;
+pub use asynchronous::AsyncSessionLog;
 
 impl Drop for SessionLog {
     fn drop(&mut self) {

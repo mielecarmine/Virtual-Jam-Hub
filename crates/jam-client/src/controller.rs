@@ -65,6 +65,14 @@ impl Controller {
         let worker = thread::Builder::new()
             .name("jam-controller".into())
             .spawn(move || {
+                let _priority = match crate::scheduling::controller() {
+                    Ok(priority) => Some(priority),
+                    Err(error) => {
+                        let _ =
+                            sender.send(Event::Error(format!("Controller scheduling: {error}")));
+                        None
+                    }
+                };
                 control_loop(
                     &receiver,
                     &sender,
@@ -278,10 +286,11 @@ fn control_loop<S: ActiveSession>(
     send(Event::Catalog(
         discover(&preferences).map_err(|error| error.to_string()),
     ));
+    // Declaration order also stops streams before joining the logger during unwinding.
+    #[cfg(feature = "telemetry-log")]
+    let mut log: Option<crate::telemetry_log::AsyncSessionLog> = None;
     let mut session: Option<S> = None;
     let mut phase = Phase::Disconnected;
-    #[cfg(feature = "telemetry-log")]
-    let mut log: Option<crate::telemetry_log::SessionLog> = None;
     #[cfg(feature = "telemetry-log")]
     let mut remote_peers = 0;
     loop {
@@ -310,9 +319,9 @@ fn control_loop<S: ActiveSession>(
                     }
                 }
                 Command::Disconnect => {
+                    drop(session.take());
                     #[cfg(feature = "telemetry-log")]
                     drop(log.take());
-                    drop(session.take());
                     phase = Phase::Disconnected;
                     send(Event::Phase(phase));
                 }
@@ -329,9 +338,9 @@ fn control_loop<S: ActiveSession>(
                     }
                 }
                 Command::Shutdown(selected) => {
+                    drop(session.take());
                     #[cfg(feature = "telemetry-log")]
                     drop(log.take());
-                    drop(session.take());
                     if let Some(selected) = selected {
                         save(&selected);
                     }
@@ -348,10 +357,11 @@ fn control_loop<S: ActiveSession>(
                     #[cfg(feature = "telemetry-log")]
                     {
                         remote_peers = 0;
-                        match crate::telemetry_log::SessionLog::start(
+                        match crate::telemetry_log::AsyncSessionLog::start(
                             path,
                             &active.log_preferences(&preferences),
                             active.log_audio(),
+                            events.clone(),
                         ) {
                             Ok(writer) => log = Some(writer),
                             Err(error) => send(Event::Error(format!("Telemetry log: {error}"))),
@@ -360,9 +370,9 @@ fn control_loop<S: ActiveSession>(
                     send(Event::Phase(phase));
                 }
                 Err(error) => {
+                    drop(session.take());
                     #[cfg(feature = "telemetry-log")]
                     drop(log.take());
-                    drop(session.take());
                     phase = Phase::Disconnected;
                     send(Event::Error(error.to_string()));
                     send(Event::Phase(phase));
@@ -381,12 +391,15 @@ fn control_loop<S: ActiveSession>(
             }
         }
     }
+    drop(session.take());
+    #[cfg(feature = "telemetry-log")]
+    drop(log.take());
 }
 
 fn publish_updates<S: ActiveSession>(
     active: &mut S,
     events: &Sender<Event>,
-    #[cfg(feature = "telemetry-log")] log: &mut Option<crate::telemetry_log::SessionLog>,
+    #[cfg(feature = "telemetry-log")] log: &mut Option<crate::telemetry_log::AsyncSessionLog>,
     #[cfg(feature = "telemetry-log")] remote_peers: &mut u32,
 ) {
     if let Some(view) = active.mixer_update() {
@@ -399,10 +412,7 @@ fn publish_updates<S: ActiveSession>(
     if let Some(metrics) = active.telemetry_update() {
         #[cfg(feature = "telemetry-log")]
         if let Some(writer) = log.as_mut() {
-            if let Err(error) = writer.record(*remote_peers, metrics, active.xruns()) {
-                let _ = events.send(Event::Error(format!("Telemetry log: {error}")));
-                drop(log.take());
-            }
+            writer.record(*remote_peers, metrics, active.xruns());
         }
         let _ = events.send(Event::Telemetry(metrics));
     }

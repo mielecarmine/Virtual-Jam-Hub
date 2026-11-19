@@ -242,13 +242,15 @@ fn runtime_error_finalizes_log_and_log_open_failure_keeps_session_connected() {
         commands
             .send(Command::Connect(Preferences::default()))
             .unwrap();
-        wait_for(
-            &events,
-            |event| matches!(event, Event::Error(error) if error.starts_with("Telemetry log:")),
-        );
-        wait_for(&events, |event| {
-            matches!(event, Event::Phase(Phase::Connected))
-        });
+        // Logger errors arrive independently of the controller's Connected event.
+        let (mut connected, mut failed) = (false, false);
+        while !connected || !failed {
+            match events.recv_timeout(Duration::from_secs(3)).unwrap() {
+                Event::Error(error) if error.starts_with("Telemetry log:") => failed = true,
+                Event::Phase(Phase::Connected) => connected = true,
+                _ => {}
+            }
+        }
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         commands.send(Command::Shutdown(None)).unwrap();
         worker.join().unwrap();
@@ -276,4 +278,96 @@ fn active_wait_preserves_commands_and_reports_channel_shutdown() {
         receive_command(&receiver, Duration::from_micros(250), true),
         Err(crossbeam_channel::RecvTimeoutError::Disconnected)
     ));
+}
+
+// Diagnostic only: the OS may preempt this process; real driver validation is separate.
+#[cfg(feature = "telemetry-log")]
+#[test]
+#[ignore = "wall-clock scheduling probe: run explicitly on an idle machine"]
+fn controller_scheduling_probe() {
+    struct Probe {
+        last: Instant,
+        report: Instant,
+        peak: f64,
+    }
+    impl ActiveSession for Probe {
+        fn poll(&mut self) -> io::Result<bool> {
+            let now = Instant::now();
+            self.peak = self
+                .peak
+                .max(now.duration_since(self.last).as_secs_f64() * 1000.0);
+            self.last = now;
+            Ok(true)
+        }
+        fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
+            if self.report.elapsed() < Duration::from_millis(500) {
+                return None;
+            }
+            self.report = Instant::now();
+            Some(crate::network::Telemetry {
+                worker_max_gap_ms: std::mem::take(&mut self.peak),
+                ..Default::default()
+            })
+        }
+    }
+    for elevated in [false, true] {
+        let path = crate::setup::tests::temporary_path("scheduling-probe");
+        let directory = path.parent().unwrap().to_path_buf();
+        let (commands, receiver) = crossbeam_channel::unbounded();
+        let (sender, events) = crossbeam_channel::unbounded();
+        let worker = thread::Builder::new()
+            .name("jam-controller".into())
+            .spawn(move || {
+                let _priority = elevated.then(|| crate::scheduling::controller().unwrap());
+                control_loop(
+                    &receiver,
+                    &sender,
+                    Preferences::default(),
+                    &path,
+                    |_| {
+                        Ok(Probe {
+                            last: Instant::now(),
+                            report: Instant::now(),
+                            peak: 0.0,
+                        })
+                    },
+                    |_| Ok(Catalog::default()),
+                );
+            })
+            .unwrap();
+        commands
+            .send(Command::Connect(Preferences::default()))
+            .unwrap();
+        let (mut peak, mut above_five, mut above_ten) = (0.0_f64, 0, 0);
+        for _ in 0..10 {
+            loop {
+                match events.recv_timeout(Duration::from_secs(3)).unwrap() {
+                    Event::Telemetry(metrics) => {
+                        peak = peak.max(metrics.worker_max_gap_ms);
+                        above_five += u32::from(metrics.worker_max_gap_ms >= 5.0);
+                        above_ten += u32::from(metrics.worker_max_gap_ms > 10.0);
+                        break;
+                    }
+                    Event::Error(error) => panic!("{error}"),
+                    _ => {}
+                }
+            }
+        }
+        commands.send(Command::Shutdown(None)).unwrap();
+        worker.join().unwrap();
+        eprintln!(
+            "elevated={elevated}: peak={peak:.3} ms; intervals >=5ms={above_five}/10; >10ms={above_ten}/10"
+        );
+        let file = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|file| file.extension().is_some_and(|ext| ext == "txt"))
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(file)
+                .unwrap()
+                .contains("telemetry_dropped_samples=0")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

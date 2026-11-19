@@ -36,6 +36,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+#[allow(dead_code)] // The headless example shares this allocator but has no file logger.
+pub(crate) fn assert_no_allocations(operation: impl FnOnce()) {
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    operation();
+    let allocations = ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(allocations, Some(0));
+}
+
 #[test]
 fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
     let stats = Stats::default();
