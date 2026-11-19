@@ -9,7 +9,7 @@ use std::{
 
 use crate::{network::Telemetry, setup::Preferences};
 
-const NAMES: [&str; 20] = [
+const NAMES: [&str; 27] = [
     "remote_peers",
     "rtt_ms",
     "jitter_ms",
@@ -30,6 +30,13 @@ const NAMES: [&str; 20] = [
     "resyncs",
     "worker_max_gap_ms",
     "rtt_max_ms",
+    "audio_io_ms",
+    "codec_ms",
+    "network_one_way_ms",
+    "rx_buffer_ms",
+    "total_one_way_ms",
+    "headroom_ms",
+    "latency_class",
 ];
 
 /// Actual CPAL stream configuration and the latest observed callback size.
@@ -48,7 +55,7 @@ pub struct SessionLog {
     started: std::time::Instant,
     header_pending: bool,
     // Exact nearest-rank p95 over the whole session, including missing-RTT handling.
-    values: [Vec<f64>; 20],
+    values: [Vec<f64>; NAMES.len()],
 }
 
 impl SessionLog {
@@ -131,6 +138,10 @@ impl SessionLog {
             self.writer,
             "counters=cumulative since session start (audio u32 wraps; worker u32 saturates); input_callbacks/output_callbacks=driver calls; not_ready_samples=silent mono samples summed over active unready peers; align_dropped_samples=mono samples discarded including stale epochs; last_output_frames=last valid driver block (0=unobserved); late_dropped=all late packets including late_dropped_far (>=64 frames); plc_frames=Opus PLC decodes including holds, corrupt payload fallback and skipped missing frames; skipped_frames=cursor advances by skip/trim; rx_push_dropped=whole rejected chunks; resyncs=cursor reanchors and discontinuity resets (startup excluded); worker_max_gap_ms=peak tick gap in interval; rtt_max_ms=peak new Pong RTT in interval (N/A=no Pong); input_channels/output_channels=selected stream channels; sample rates=CPAL stream rates in Hz"
         )?;
+        writeln!(
+            self.writer,
+            "latency=estimated one-way, not measured peer-to-peer audio; audio_io_ms=requested capture + observed output (requested fallback) at 48000 Hz; codec_ms=Opus frame + encoder lookahead; network_one_way_ms=server RTT/2; rx_buffer_ms=max encoded peer queue + mixer SPSC reserve; total_one_way_ms=sum of components; headroom_ms=25-total (negative=over budget); latency_class=0 optimal (<20), 1 limit (20..=25), 2 tempo-drag (>25); missing RTT: network/total/headroom/class=N/A (excluded from summary)"
+        )?;
         writeln!(self.writer, "elapsed_s\t{}", NAMES.join("\t"))?;
         self.header_pending = false;
         Ok(())
@@ -170,6 +181,20 @@ impl SessionLog {
             Some(f64::from(metrics.diagnostics.resyncs)),
             Some(metrics.worker_max_gap_ms),
             metrics.rtt_max_ms,
+            metrics.latency.map(|budget| budget.audio_io_ms),
+            metrics.latency.map(|budget| budget.codec_ms),
+            metrics.latency.and_then(|budget| budget.network_one_way_ms),
+            metrics.latency.map(|budget| budget.rx_buffer_ms),
+            metrics.latency.and_then(|budget| budget.total_one_way_ms),
+            metrics.latency.and_then(|budget| budget.headroom_ms),
+            metrics
+                .latency
+                .and_then(|budget| budget.class)
+                .map(|class| match class {
+                    crate::network::telemetry::LatencyClass::Optimal => 0.0,
+                    crate::network::telemetry::LatencyClass::Limit => 1.0,
+                    crate::network::telemetry::LatencyClass::TempoDrag => 2.0,
+                }),
         ];
         write!(self.writer, "{elapsed:.3}")?;
         for (values, value) in self.values.iter_mut().zip(row) {

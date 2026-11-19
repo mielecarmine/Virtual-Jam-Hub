@@ -1,8 +1,16 @@
 //! Receive-side measurements: a 64-packet window tolerates duplicates and reordering.
 use std::time::Instant;
 
+mod latency;
+pub use latency::LatencyBudget;
+// The headless benchmark shares this module but has no GUI/status logger.
+#[allow(unused_imports)]
+pub use latency::LatencyClass;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Telemetry {
+    /// Filled by the desktop controller, where the audio configuration is known.
+    pub latency: Option<LatencyBudget>,
     pub rtt_ms: Option<f64>,
     /// Peak of newly measured RTTs in this interval; None when no Pong was received.
     #[cfg_attr(not(feature = "telemetry-log"), allow(dead_code))]

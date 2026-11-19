@@ -355,6 +355,7 @@ impl eframe::App for AppState {
                         self.telemetry.jitter_ms, self.telemetry.loss_percent, self.telemetry.buffer_ms))
                         .on_hover_text("Ricezione: jitter massimo tra peer; perdita cumulativa dopo una finestra di riordino di 64 pacchetti; buffer = massimo audio codificato attualmente in coda, esclusi buffer hardware e SPSC.");
                 } else { ui.label("Jitter: — · Packet Loss: — · Jitter Buffer: —"); }
+                latency_indicator(ui, if self.phase == Phase::Connected { self.telemetry.latency } else { None });
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -399,6 +400,47 @@ impl eframe::App for AppState {
         }
         ctx.request_repaint_after(Duration::from_secs_f64(1.0 / 60.0));
     }
+}
+
+fn latency_indicator(ui: &mut egui::Ui, budget: Option<crate::network::telemetry::LatencyBudget>) {
+    use crate::network::telemetry::LatencyClass;
+    let Some(budget) = budget else {
+        ui.label("Latenza E2E: —");
+        return;
+    };
+    let color = match budget.class {
+        Some(LatencyClass::Optimal) => egui::Color32::LIGHT_GREEN,
+        Some(LatencyClass::Limit) => egui::Color32::YELLOW,
+        Some(LatencyClass::TempoDrag) => egui::Color32::LIGHT_RED,
+        None => egui::Color32::GRAY,
+    };
+    let text = budget.total_one_way_ms.map_or_else(
+        || "Latenza E2E: — (RTT non disponibile)".into(),
+        |ms| {
+            format!(
+                "Latenza E2E: ~{ms:.1} ms · {}",
+                budget.class.map_or("—", LatencyClass::label)
+            )
+        },
+    );
+    ui.colored_label(color, text).on_hover_ui(|ui| {
+        ui.label(format!("Audio I/O: {:.1} ms (cattura richiesta + ultimo blocco output; fallback al buffer richiesto)", budget.audio_io_ms));
+        ui.label(format!("Codec: {:.1} ms (frame Opus + lookahead encoder)", budget.codec_ms));
+        ui.label(budget.network_one_way_ms.map_or_else(
+            || "Rete: — (RTT non disponibile)".into(),
+            |ms| format!("Rete: {ms:.1} ms (RTT server / 2)"),
+        ));
+        ui.label(format!("Jitter/RX Buffer: {:.1} ms (massimo tra peer + riserva SPSC mixer)", budget.rx_buffer_ms));
+        ui.label(budget.headroom_ms.map_or_else(
+            || "Margine residuo: —".into(),
+            |ms| format!("Margine residuo rispetto a 25 ms: {ms:+.1} ms"),
+        ));
+        ui.label("Ottimale <20 ms · Limite 20–25 ms · Rischio Tempo-Drag >25 ms");
+        ui.label("Stima one-way con audio I/O locale e RTT server: non misura il percorso audio completo tra due musicisti né l'hardware remoto.");
+        if budget.class == Some(LatencyClass::TempoDrag) {
+            ui.label("Consigliato un metronomo sincronizzato o un Tempo Leader come riferimento ritmico condiviso.");
+        }
+    });
 }
 
 impl Drop for AppState {
