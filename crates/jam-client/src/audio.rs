@@ -223,4 +223,4 @@ pub fn bridge(mic_to_net: &mut Consumer<f32>, net_to_speaker: &mut Producer<f32>
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

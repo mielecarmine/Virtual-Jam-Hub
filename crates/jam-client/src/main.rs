@@ -9,6 +9,7 @@ mod jitter;
 mod mixer;
 mod monitor;
 mod network;
+mod scheduling;
 mod setup;
 mod streams;
 #[cfg(feature = "telemetry-log")]

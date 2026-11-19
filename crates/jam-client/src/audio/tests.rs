@@ -1,7 +1,7 @@
 use super::*;
 use rtrb::RingBuffer;
 
-mod allocation;
+pub(crate) mod allocation;
 
 #[test]
 fn stalled_local_monitor_does_not_drop_or_change_network_audio() {

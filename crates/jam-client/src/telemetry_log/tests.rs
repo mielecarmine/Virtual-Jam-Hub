@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn captured_timestamp_is_preserved_independently_of_writer_delay() {
+    let path = crate::setup::tests::temporary_path("telemetry-timestamp");
+    let mut log = SessionLog::start(&path, &Preferences::default(), AudioInfo::default()).unwrap();
+    log.record_at(123.456, 0, Telemetry::default(), [0; 2])
+        .unwrap();
+    drop(log);
+    let file = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        std::fs::read_to_string(file)
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("123.456\t"))
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn writes_flushes_and_summarizes_entire_session_without_overwriting() {
     let path = crate::setup::tests::temporary_path("telemetry");
     let preferences = Preferences {

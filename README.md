@@ -644,8 +644,14 @@ cargo run -p jam-client --features telemetry-log
 Ogni connessione dalla GUI crea un file `telemetry-*.txt` accanto a `client.toml`.
 Per scegliere una directory di prova, impostare `JAM_CLIENT_CONFIG` al percorso
 completo del file di configurazione, ad esempio `/tmp/jam-test/client.toml`.
-Il logger scrive e scarica il buffer su file nel solo thread `jam-controller`;
-le callback audio e il worker CLI `udp-network` non eseguono scritture di log.
+Il thread dedicato `jam-telemetry` apre, formatta, scrive e scarica i file,
+e calcola il riepilogo finale. `jam-controller` consegna snapshot con timestamp
+di acquisizione tramite una coda lock-free SPSC `rtrb` da 64 campioni (32 secondi):
+il campionamento non alloca, non attende il disco e non risveglia il logger con syscall.
+Se la coda è piena viene scartato il nuovo campione; `telemetry_dropped_samples`
+riporta il totale saturante nel file prima del riepilogo. Le statistiche includono
+solo i campioni accettati. Il logger controlla la coda ogni 10 ms, senza richiedere
+una priorità audio. Le callback audio e il worker CLI `udp-network` non scrivono log.
 Il percorso diagnostico CLI e il benchmark headless mantengono i propri report.
 
 L'header riporta versione, OS, backend e dispositivi effettivamente aperti,
@@ -671,13 +677,42 @@ quelli del worker saturano. La dimensione del blocco è una misura, non un conta
 Entrambi i picchi ripartono a ogni pubblicazione da 500 ms; l'ultimo RTT resta
 separato e può comparire su più righe.
 
-Alla disconnessione, errore di sessione o chiusura ordinata, il riepilogo riporta
+Alla disconnessione, errore di sessione o chiusura ordinata, audio e rete vengono
+fermati prima di attendere lo scarico della coda e la chiusura del logger;
+un disco bloccato può quindi ritardare la chiusura, senza bloccare audio attivo.
+Il riepilogo riporta
 minimo, media, p95 (nearest rank) e massimo di tutti i campioni della sessione.
 Le sessioni più brevi del primo intervallo possono avere zero campioni.
 Gli arresti forzati mantengono i campioni già scaricati, ma non il riepilogo finale.
 Le statistiche esatte conservano i campioni in memoria per la durata della sessione.
 Un errore di apertura/scrittura viene segnalato senza interrompere l'audio;
 un errore durante la finalizzazione viene riportato su stderr.
+
+### Priorità del controller e verifica degli stalli — JAM-29
+
+Il thread `jam-controller` richiede MMCSS `Pro Audio` con `AVRT_PRIORITY_HIGH`
+su Windows e QoS `QOS_CLASS_USER_INTERACTIVE` su macOS. La registrazione è locale
+al thread, viene rilasciata alla sua uscita e non modifica la priorità del processo
+o il timer globale. Su macOS il logger imposta esplicitamente QoS utility per non
+ereditare quella del controller. Un errore di scheduling viene segnalato alla GUI
+e la sessione continua con la priorità disponibile. Linux mantiene lo scheduling
+standard. Riferimenti: [MMCSS](https://learn.microsoft.com/en-us/windows/win32/procthread/multimedia-class-scheduler-service),
+[QoS pthread Apple](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/PrioritizeWorkWithQoS.html).
+
+I test coprono logger fermo, saturazione senza allocazioni sul produttore,
+errori asincroni di apertura/scrittura, timestamp di acquisizione e scarico finale.
+La prova di scheduling headless opzionale stampa i gap reali del controller:
+
+```bash
+cargo test --release -p jam-client --features telemetry-log controller_scheduling_probe -- --ignored --nocapture
+```
+
+Per accettare il risultato sulle postazioni reali, ripetere la verifica hardware
+qui sotto su Windows/ASIO e macOS/CoreAudio, mantenendo audio continuo per almeno
+5 minuti per buffer. Confrontare con la build precedente su macchine scariche:
+`worker_max_gap_ms` deve restare normalmente sotto 5 ms, senza picchi sopra 10 ms
+riconducibili ai flush periodici; verificare `telemetry_dropped_samples=0`.
+La prova headless non verifica i driver audio né sostituisce questi log hardware.
 
 La pipeline verifica entrambe le configurazioni. I test del logger si eseguono con:
 
