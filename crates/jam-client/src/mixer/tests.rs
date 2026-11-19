@@ -321,11 +321,11 @@ fn remote_prefill_is_per_peer_and_restarts_after_starvation_or_reuse() {
     assert!(rx.push(1, &[0.5; 960]));
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [0.5_f32.tanh(); 128]);
-    for _ in 0..8 {
+    for _ in 0..9 {
         mixer.playback(&mut out, 1, &stats);
     }
     assert!(!mixer.ready[0]);
-    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 72);
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 120);
     assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [0.0; 128]);
@@ -400,11 +400,12 @@ fn diagnostics_separate_active_prefill_silence_underflow_and_alignment_drops() {
     }
     assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 72);
     mixer.playback(&mut output, 2, &stats);
-    assert_eq!(stats.telemetry().not_ready_samples, 256);
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 120);
+    assert_eq!(stats.telemetry().not_ready_samples, 208);
     let callbacks = stats.telemetry().output_callbacks;
     rx.remove(1);
     mixer.playback(&mut output, 2, &stats);
-    assert_eq!(stats.telemetry().not_ready_samples, 256);
+    assert_eq!(stats.telemetry().not_ready_samples, 208);
     assert_eq!(stats.telemetry().output_callbacks, callbacks + 1);
     assert_eq!(stats.telemetry().last_output_frames, 128);
 }
@@ -421,4 +422,73 @@ fn stale_epoch_alignment_drops_are_counted() {
         FRAME_SAMPLES as u32
     );
     assert_eq!(stats.telemetry().not_ready_samples, 0);
+}
+
+#[test]
+fn isolated_underflow_recovers_next_callback_without_adding_latency() {
+    for frames in [64, 128, 256] {
+        let (mut rx, mut mixer) = channels(frames);
+        let stats = Stats::default();
+        let mut output = vec![0.0_f32; frames];
+        assert!(rx.push(1, &vec![0.5; RX_TARGET_SAMPLES + frames]));
+        mixer.playback(&mut output, 1, &stats);
+        // Repeated single-sample gaps. Every return includes the delayed sample
+        // plus one callback; the delayed sample must be retired, not replayed.
+        for cycle in 1..=100 {
+            while mixer.rings[0].pop().is_ok() {}
+            assert!(rx.push(1, &vec![0.5; frames - 1]));
+            mixer.playback(&mut output, 1, &stats);
+            assert!(mixer.ready[0]);
+            assert!(output[frames - 1] > 0.0);
+            assert!(output[frames - 1] < output[frames - 2]);
+            let last = output[frames - 1];
+            assert!(rx.push(1, &[0.9])); // Obsolete sample, easily distinguished.
+            assert!(rx.push(1, &vec![-0.5; frames]));
+            mixer.playback(&mut output, 1, &stats);
+            assert!((output[0] - last).abs() < 0.022);
+            assert!(output.windows(2).all(|v| (v[1] - v[0]).abs() < 0.022));
+            assert_eq!(output[frames - 1], (-0.5_f32).tanh());
+            assert_eq!(mixer.rings[0].slots(), 0);
+            assert_eq!(mixer.continuity[0].debt, 0);
+            assert_eq!(stats.telemetry().align_dropped_samples, cycle);
+            assert_eq!(stats.telemetry().not_ready_samples, 0);
+            assert_eq!(stats.output_underflows.load(Ordering::Relaxed), cycle);
+        }
+    }
+}
+
+#[test]
+fn fade_and_starvation_span_callbacks_and_refill_only_the_starved_peer() {
+    let (mut rx, mut mixer) = channels(64);
+    let stats = Stats::default();
+    assert!(rx.push(1, &[0.5; RX_TARGET_SAMPLES + 64]));
+    assert!(rx.push(2, &[0.25; RX_TARGET_SAMPLES + 64]));
+    mixer.playback(&mut [0.0; 64], 1, &stats);
+    while mixer.rings[0].pop().is_ok() {}
+    // Keep the last valid sample near the callback boundary.
+    assert!(rx.push(1, &[0.5; 48]));
+    rx.controls[1].mute.store(true, Ordering::Relaxed);
+    let mut output = [0.0; 64];
+    mixer.playback(&mut output, 1, &stats);
+    assert!(output[48] > 0.0 && output[48] < output[47]);
+    let last = output[63];
+    mixer.playback(&mut output, 1, &stats);
+    assert!(output[0] > 0.0 && output[0] < last);
+    assert!(output.windows(2).all(|v| v[1] <= v[0]));
+    assert_eq!(output[31..], [0.0; 33]);
+    assert!(mixer.ready[0]); // 80 misses, below one Opus interval.
+    mixer.playback(&mut output, 1, &stats);
+    assert!(!mixer.ready[0]);
+    assert!(mixer.ready[1]);
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 120);
+    assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+    mixer.playback(&mut output, 1, &stats);
+    assert_eq!(output, [0.0; 64]);
+    assert!(!mixer.ready[0]);
+    assert!(rx.push(1, &[0.5; RX_TARGET_SAMPLES]));
+    mixer.playback(&mut output, 1, &stats);
+    assert!(mixer.ready[0]);
+    assert!(output[0] > 0.0 && output[0] < 0.02);
+    assert!(output.windows(2).all(|v| v[1] >= v[0]));
+    assert_eq!(output[47..], [0.5_f32.tanh(); 17]);
 }

@@ -149,3 +149,25 @@ fn direct_monitor_capture_and_mix_do_not_allocate_even_when_full_or_muted() {
     let allocations = ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(allocations, Some(0));
 }
+
+#[test]
+fn mixer_micro_underflow_fades_and_refill_do_not_allocate() {
+    let (mut rx, mut mixer) = crate::mixer::channels(256);
+    let stats = Stats::default();
+    let mut output = [0.0_f32; 256];
+    let prefill = [0.5; 1200];
+    assert!(rx.push(1, &prefill));
+    mixer.playback(&mut output, 1, &stats);
+    while mixer.rings[0].pop().is_ok() {}
+    assert_no_allocations(|| {
+        assert!(rx.push(1, &[0.5; 255]));
+        mixer.playback(&mut output, 1, &stats);
+        assert!(rx.push(1, &[-0.5; 257]));
+        mixer.playback(&mut output, 1, &stats);
+        mixer.playback(&mut output, 1, &stats);
+        assert!(rx.push(1, &prefill));
+        mixer.playback(&mut output, 1, &stats);
+    });
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 121);
+    assert_eq!(stats.telemetry().align_dropped_samples, 1);
+}
