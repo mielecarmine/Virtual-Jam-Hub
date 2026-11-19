@@ -12,11 +12,12 @@ Quando l'utente chiede di partire con un nuovo ticket, seguire sempre questo ord
 
 1. Leggere il ticket completo nella JAM board collegata alla repository.
 2. Spostare il ticket in `In progress`.
-3. Aprire un branch dedicato da `develop` aggiornato (prefisso `codex/`).
-4. Implementare il ticket ed eseguire i test e tutti i gate di verifica del progetto.
-5. Presentare il risultato e attendere l'approvazione esplicita dell'utente prima del merge.
-6. Dopo l'approvazione, effettuare il merge manuale su `develop`.
-7. Spostare il ticket in `Done` solo dopo il merge.
+3. Se non esiste gia', aprire un branch pre-release (1.0.n+1-beta) dedicato da `develop` aggiornato.
+4. Apri un branch dedicato al task dal branch pre-release attivo aggiornato.
+5. Implementare il ticket ed eseguire i test e tutti i gate di verifica del progetto.
+6. Presentare il risultato e attendere l'approvazione esplicita dell'utente prima del merge.
+7. Dopo l'approvazione, effettuare il merge manuale sul branch pre-release.
+8. Spostare il ticket in `Done` solo dopo il merge.
 
 Se un permesso impedisce un passaggio, segnalarlo senza dichiararlo completato.
 
@@ -48,6 +49,7 @@ Se un permesso impedisce un passaggio, segnalarlo senza dichiararlo completato.
   - `cargo test --workspace`
 
 <!-- BEGIN AWS Agent Toolkit rules -->
+
 # AWS Guidance for the new AWS experience
 
 This user has signed up for the new AWS experience. This experience lets you sign into AWS using a social provider and requires the following additional context.
