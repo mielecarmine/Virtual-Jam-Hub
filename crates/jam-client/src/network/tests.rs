@@ -2,6 +2,65 @@ use super::*;
 use rtrb::RingBuffer;
 
 #[test]
+fn tempo_leader_uses_only_leaders_queue_and_tracks_reference_changes() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "follower").unwrap();
+    network.peer_id = Some(1);
+    network.rtt = Some((24.0, network.started));
+    network.clock.observe(0, 1_000_000, Duration::ZERO);
+    let mut encoder = codec::encoder().unwrap();
+    let payload = codec::tests::encode(&mut encoder, 0.0);
+    for (id, count) in [(2, 3), (3, 12)] {
+        let mut peer = PeerJitterBuffer::new(0, network.started, 3).unwrap();
+        for sequence in 0..count {
+            peer.insert(sequence, &payload, network.started).unwrap();
+        }
+        network.peers.insert(id, peer);
+    }
+    let state = MetronomeState {
+        config: MetronomeConfig {
+            enabled: true,
+            leader_peer_id: 2,
+            ..MetronomeConfig::default()
+        },
+        anchor_server_timestamp_us: 1_000_000,
+    };
+    network.metronome = Some(state);
+    let (mut rx, _) = crate::mixer::channels(128);
+    network.sync_metronome(&mut rx, network.started);
+    // 12 ms transit + 7.5 ms leader jitter + 17.5 ms SPSC, excluding peer 3's 30 ms.
+    assert_eq!(
+        rx.metronome.phase_delay_samples.load(Ordering::Relaxed),
+        1776
+    );
+    network
+        .peers
+        .get_mut(&2)
+        .unwrap()
+        .pop(network.started + Duration::from_secs(1))
+        .unwrap();
+    network.sync_metronome(&mut rx, network.started);
+    assert_eq!(
+        rx.metronome.phase_delay_samples.load(Ordering::Relaxed),
+        1656
+    );
+    // Local leader and absolute clock must always have zero offset, with the same anchor.
+    for leader in [1, 0] {
+        network.metronome.as_mut().unwrap().config.leader_peer_id = leader;
+        network.sync_metronome(&mut rx, network.started);
+        assert_eq!(rx.metronome.phase_delay_samples.load(Ordering::Relaxed), 0);
+    }
+    network.metronome.as_mut().unwrap().config.leader_peer_id = 2;
+    network.rtt = None;
+    network.peers.clear();
+    network.sync_metronome(&mut rx, network.started);
+    assert_eq!(
+        rx.metronome.phase_delay_samples.load(Ordering::Relaxed),
+        840
+    );
+}
+
+#[test]
 fn room_click_waits_for_clock_then_renders_without_peers_and_ignores_tick_jitter() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut network = Network::connect(server.local_addr().unwrap(), "click").unwrap();
@@ -561,6 +620,46 @@ fn two_clients_exchange_opus_through_real_sfu_without_echo() {
                 thread::sleep(Duration::from_millis(1));
             }
             assert_ne!(a.peer_id, b.peer_id);
+            // Room controls from either GUI must converge to the same authoritative state.
+            for (index, config) in [
+                MetronomeConfig {
+                    enabled: true,
+                    ..MetronomeConfig::default()
+                },
+                MetronomeConfig {
+                    enabled: true,
+                    bpm: 180,
+                    beats_per_bar: 6,
+                    leader_peer_id: a.peer_id.unwrap(),
+                },
+                MetronomeConfig {
+                    bpm: 200,
+                    beats_per_bar: 3,
+                    leader_peer_id: b.peer_id.unwrap(),
+                    ..MetronomeConfig::default()
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if index % 2 == 0 {
+                    a.update_metronome(config).unwrap();
+                } else {
+                    b.update_metronome(config).unwrap();
+                }
+                while a
+                    .metronome_state()
+                    .is_none_or(|state| state.config != config)
+                    || b.metronome_state()
+                        .is_none_or(|state| state.config != config)
+                {
+                    assert!(Instant::now() < deadline, "room state timeout");
+                    a.tick(&mut a_mic, &mut a_speaker, Instant::now()).unwrap();
+                    b.tick(&mut b_mic, &mut b_speaker, Instant::now()).unwrap();
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert_eq!(a.metronome_state(), b.metronome_state());
+            }
             let a_remote = b.peer_id.unwrap();
             let b_remote = a.peer_id.unwrap();
             for (a_sample, b_sample) in crate::codec::tests::tone(0.25)

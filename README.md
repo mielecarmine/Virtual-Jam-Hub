@@ -868,9 +868,36 @@ La precisione al campione riguarda la cadenza locale. La correlazione iniziale
 tra clock di stanza e cursore audio usa l'ultimo blocco renderizzato: fase
 assoluta fra dispositivi, latenza hardware e deriva del clock audio richiedono
 verifica su hardware reale e non sono misurate dai test deterministici.
-Controlli GUI e compensazione Tempo Leader appartengono a JAM-34.
+La GUI e la compensazione Tempo Leader sono descritte sotto (JAM-34).
 
 I test coprono periodi interi/frazionari, accenti, callback da 64/128/256 frame,
 ancore future, transizioni durante un impulso, gain/mute locali, pubblicazioni
 interrotte e integrazione con il clock del worker senza peer audio. La suite
 `audio::tests::allocation` verifica anche il metronomo attivo e riconfigurato.
+
+### Tempo Leader e controlli del click — JAM-34
+
+Durante la connessione, la sezione **Metronomo & Prevenzione Tempo-Drag** permette
+di attivare il click di stanza, scegliere 30–300 BPM, 1–16 battiti per misura
+(incluse 2/4, 3/4, 4/4 e 6/8) e il riferimento: clock assoluto oppure un musicista
+connesso, incluso sé stessi. I BPM contano gli impulsi del click anche in 6/8.
+Ogni modifica viene mostrata dopo la conferma UDP del server e propagata agli altri
+client. I pallini seguono il beat renderizzato, con un simbolo distinto sul downbeat.
+Volume in dB e **Mute Click** regolano soltanto l'ascolto locale, senza fermare il
+beat visivo. Con E2E stimata oltre 25 ms e metronomo di stanza spento compare un
+suggerimento discreto per attivarlo o scegliere un Tempo Leader.
+
+Il clock assoluto e il Leader mantengono offset zero. Il Follower sottrae alla
+fase nominale un ritardo positivo in campioni: `RTT server / 2` + audio accodato nel
+`PeerJitterBuffer` del solo Leader + riserva SPSC del mixer (17,5 ms). La stima viene
+aggiornata sul worker; il callback legge un atomico una volta per blocco, senza
+allocazioni, lock o syscall. Cambi di riferimento conservano l'ancora di stanza e
+lasciano terminare un click già iniziato. Se RTT o audio del Leader non sono ancora
+disponibili, le rispettive componenti valgono zero; resta la riserva SPSC.
+
+Il ritardo è una stima: il protocollo non misura l'uplink del Leader né l'hardware
+remoto. Non garantisce allineamento acustico esatto tra dispositivi; resta necessaria
+una verifica in cuffia su hardware reale. I test coprono segno del ritardo, offset
+zero del Leader, selezione della sola coda interessata, cambi di riferimento,
+fase assoluta con epoche audio diverse, propagazione dei comandi fra due client
+attraverso il server reale e zero allocazioni durante le variazioni di offset.

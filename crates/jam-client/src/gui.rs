@@ -25,6 +25,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let controller = Controller::start(preferences.clone(), path.clone())?;
     let app = AppState {
+        metronome: None,
         telemetry: crate::network::Telemetry::default(),
         meters: std::array::from_fn(|_| Meter::default()),
         mixer: None,
@@ -51,6 +52,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 struct AppState {
+    metronome: Option<jam_protocol::MetronomeState>,
     telemetry: crate::network::Telemetry,
     meters: [Meter; jam_protocol::MAX_PEERS + 1],
     mixer: Option<MixerView>,
@@ -79,6 +81,7 @@ impl AppState {
     fn events(&mut self) {
         while let Ok(event) = self.controller.events.try_recv() {
             match event {
+                Event::Metronome(state) => self.metronome = Some(state),
                 Event::Telemetry(metrics) => self.telemetry = metrics,
                 Event::Mixer(view) => {
                     for peer in &view.peers {
@@ -105,6 +108,7 @@ impl AppState {
                 Event::Phase(phase) => {
                     if phase == Phase::Disconnected {
                         self.mixer = None;
+                        self.metronome = None;
                         self.telemetry = crate::network::Telemetry::default();
                         self.meters = std::array::from_fn(|_| Meter::default());
                     }
@@ -264,6 +268,78 @@ impl AppState {
         });
     }
 
+    fn metronome(&mut self, ui: &mut egui::Ui) {
+        if self.phase != Phase::Connected {
+            return;
+        }
+        ui.separator();
+        ui.heading("Metronomo & Prevenzione Tempo-Drag");
+        let Some(state) = self.metronome else {
+            ui.label("In attesa dello stato del metronomo di stanza…");
+            return;
+        };
+        let mut config = state.config;
+        ui.add_enabled_ui(!self.disconnecting, |ui| {
+            ui.checkbox(&mut config.enabled, "Metronomo On/Off · stanza");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("BPM");
+                ui.add(egui::DragValue::new(&mut config.bpm).range(30..=300));
+                egui::ComboBox::from_id_salt("metronome_meter")
+                    .selected_text(meter_label(config.beats_per_bar))
+                    .show_ui(ui, |ui| {
+                        for beats in 1..=16 {
+                            ui.selectable_value(
+                                &mut config.beats_per_bar,
+                                beats,
+                                meter_label(beats),
+                            );
+                        }
+                    });
+            });
+            ui.small("Battiti per misura; i BPM contano gli impulsi del click (anche in 6/8).");
+            if let Some(view) = &self.mixer {
+                ui.label("Riferimento / Tempo Leader");
+                egui::ComboBox::from_id_salt("tempo_leader")
+                    .selected_text(leader_label(
+                        config.leader_peer_id,
+                        view,
+                        &self.preferences.nickname,
+                    ))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut config.leader_peer_id,
+                            0,
+                            "Clock Assoluto (Stanza)",
+                        );
+                        ui.selectable_value(
+                            &mut config.leader_peer_id,
+                            view.local_peer_id,
+                            format!("{} (tu)", self.preferences.nickname),
+                        );
+                        for peer in &view.peers {
+                            ui.selectable_value(
+                                &mut config.leader_peer_id,
+                                peer.peer_id,
+                                String::from_utf8_lossy(
+                                    &peer.nickname[..usize::from(peer.nickname_len)],
+                                ),
+                            );
+                        }
+                    });
+                click_monitoring(ui, &view.metronome, state.config);
+            }
+        });
+        if config != state.config {
+            self.command(Command::Metronome(config));
+        }
+        ui.small(
+            "I controlli di stanza si aggiornano alla conferma del server per tutti i musicisti.",
+        );
+        if tempo_drag_hint(self.telemetry.latency, state.config.enabled) {
+            ui.label("Latenza oltre 25 ms: attiva il Metronomo di stanza o scegli un Tempo Leader per evitare il tempo-drag.");
+        }
+    }
+
     fn refresh(&mut self) {
         self.error = None;
         self.loading = self.command(Command::Refresh(self.preferences.clone()));
@@ -314,6 +390,86 @@ impl AppState {
             self.disconnecting = self.command(Command::Disconnect);
         }
     }
+}
+
+fn meter_label(beats: u8) -> String {
+    match beats {
+        2..=4 => format!("{beats}/4"),
+        6 => "6/8".into(),
+        _ => format!("{beats} battiti"),
+    }
+}
+
+fn leader_label(id: u8, view: &MixerView, nickname: &str) -> String {
+    if id == 0 {
+        "Clock Assoluto (Stanza)".into()
+    } else if id == view.local_peer_id {
+        format!("{nickname} (tu)")
+    } else {
+        view.peers
+            .iter()
+            .find(|peer| peer.peer_id == id)
+            .map_or_else(
+                || format!("Peer {id} (aggiornamento stanza…)"),
+                |peer| {
+                    String::from_utf8_lossy(&peer.nickname[..usize::from(peer.nickname_len)])
+                        .into_owned()
+                },
+            )
+    }
+}
+
+fn tempo_drag_hint(
+    budget: Option<crate::network::telemetry::LatencyBudget>,
+    enabled: bool,
+) -> bool {
+    !enabled
+        && budget
+            .and_then(|value| value.total_one_way_ms)
+            .is_some_and(|ms| ms > 25.0)
+}
+
+fn click_monitoring(
+    ui: &mut egui::Ui,
+    controls: &crate::mixer::MetronomeControls,
+    config: jam_protocol::MetronomeConfig,
+) {
+    let beat = controls.current_beat.load(Ordering::Relaxed);
+    ui.horizontal_wrapped(|ui| {
+        for index in 0..u32::from(config.beats_per_bar) {
+            let active = config.enabled && index == beat;
+            let color = if active {
+                egui::Color32::LIGHT_GREEN
+            } else {
+                egui::Color32::GRAY
+            };
+            let text = if index == 0 { "◆" } else { "●" };
+            ui.colored_label(color, text)
+                .on_hover_text(format!("Battito {}", index + 1));
+        }
+    });
+    let mut db = gain_to_db(f32::from_bits(controls.gain.load(Ordering::Relaxed)));
+    if ui
+        .add(
+            egui::Slider::new(&mut db, -60.0..=6.0)
+                .text("Volume click locale")
+                .suffix(" dB"),
+        )
+        .changed()
+    {
+        controls
+            .gain
+            .store(db_to_gain(db).to_bits(), Ordering::Relaxed);
+    }
+    let mut mute = controls.mute.load(Ordering::Relaxed);
+    if ui.toggle_value(&mut mute, "Mute Click · locale").changed() {
+        controls.mute.store(mute, Ordering::Relaxed);
+    }
+    let delay_ms = f64::from(controls.phase_delay_samples.load(Ordering::Relaxed)) * 1000.0
+        / f64::from(jam_protocol::SAMPLE_RATE);
+    ui.small(format!("Ritardo click Tempo Leader: ~{delay_ms:.1} ms")).on_hover_text(
+        "Stima: RTT server / 2 + coda jitter del solo Leader + riserva SPSC del mixer. Il protocollo non misura l’uplink e l’hardware del Leader.",
+    );
 }
 
 fn device_combo(
@@ -376,6 +532,7 @@ impl eframe::App for AppState {
                 }
                 self.connection(ui);
                 self.mixer(ui);
+                self.metronome(ui);
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
@@ -461,6 +618,21 @@ fn gain_to_db(gain: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tempo_drag_suggestion_requires_known_latency_above_25_and_room_click_off() {
+        use crate::network::telemetry::LatencyBudget;
+        assert!(!tempo_drag_hint(None, false));
+        for (rtt, expected) in [(10.0, false), (10.002, true)] {
+            let budget = Some(LatencyBudget::estimate(0, 0, 0, Some(rtt), 0.0));
+            assert_eq!(tempo_drag_hint(budget, false), expected);
+            assert!(!tempo_drag_hint(budget, true));
+        }
+        assert!(!tempo_drag_hint(
+            Some(LatencyBudget::estimate(128, 128, 120, None, 7.5)),
+            false
+        ));
+    }
 
     #[test]
     fn meter_attack_decay_and_peak_hold_follow_elapsed_time() {

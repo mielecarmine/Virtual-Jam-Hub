@@ -1,6 +1,82 @@
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[test]
+fn room_commands_publish_confirmed_state_and_report_errors_without_ending_session() {
+    struct Room {
+        confirmed: Option<jam_protocol::MetronomeState>,
+    }
+    impl ActiveSession for Room {
+        fn poll(&mut self) -> io::Result<bool> {
+            Ok(true)
+        }
+        fn update_metronome(&mut self, config: jam_protocol::MetronomeConfig) -> io::Result<()> {
+            if config.bpm < 30 {
+                return Err(io::Error::other("invalid tempo"));
+            }
+            self.confirmed = Some(jam_protocol::MetronomeState {
+                config,
+                anchor_server_timestamp_us: 123,
+            });
+            Ok(())
+        }
+        fn metronome_update(&mut self) -> Option<jam_protocol::MetronomeState> {
+            self.confirmed.take()
+        }
+    }
+    let path = crate::setup::tests::temporary_path("metronome");
+    let (commands, receiver) = crossbeam_channel::unbounded();
+    let (sender, events) = crossbeam_channel::unbounded();
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            control_loop(
+                &receiver,
+                &sender,
+                Preferences::default(),
+                &path,
+                |_| Ok(Room { confirmed: None }),
+                |_| Ok(Catalog::default()),
+            );
+        });
+        commands
+            .send(Command::Connect(Preferences::default()))
+            .unwrap();
+        wait_for(&events, |event| {
+            matches!(event, Event::Phase(Phase::Connected))
+        });
+        let config = jam_protocol::MetronomeConfig {
+            enabled: true,
+            bpm: 180,
+            beats_per_bar: 6,
+            leader_peer_id: 2,
+        };
+        commands.send(Command::Metronome(config)).unwrap();
+        wait_for(
+            &events,
+            |event| matches!(event, Event::Metronome(state) if state.config == config && state.anchor_server_timestamp_us == 123),
+        );
+        commands
+            .send(Command::Metronome(jam_protocol::MetronomeConfig {
+                bpm: 0,
+                ..config
+            }))
+            .unwrap();
+        wait_for(
+            &events,
+            |event| matches!(event, Event::Error(error) if error.contains("invalid tempo")),
+        );
+        let updated = jam_protocol::MetronomeConfig { bpm: 200, ..config };
+        commands.send(Command::Metronome(updated)).unwrap();
+        wait_for(
+            &events,
+            |event| matches!(event, Event::Metronome(state) if state.config == updated),
+        );
+        commands.send(Command::Shutdown(None)).unwrap();
+        worker.join().unwrap();
+    });
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
 struct FakeSession {
     drops: Arc<AtomicU32>,
     fail: bool,

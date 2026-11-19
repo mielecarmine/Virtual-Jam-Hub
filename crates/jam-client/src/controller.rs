@@ -28,6 +28,7 @@ pub enum Phase {
 }
 
 pub enum Command {
+    Metronome(jam_protocol::MetronomeConfig),
     Connect(Preferences),
     Disconnect,
     SelectDevice(Preferences),
@@ -37,6 +38,8 @@ pub enum Command {
 }
 
 pub struct MixerView {
+    pub local_peer_id: u8,
+    pub metronome: Arc<mixer::MetronomeControls>,
     pub stats: Arc<Stats>,
     pub local_control: Arc<mixer::Controls>,
     pub peers: Vec<jam_protocol::PeerInfo>,
@@ -44,6 +47,7 @@ pub struct MixerView {
 }
 
 pub enum Event {
+    Metronome(jam_protocol::MetronomeState),
     Mixer(MixerView),
     Telemetry(crate::network::Telemetry),
     Catalog(Result<Catalog, String>),
@@ -99,6 +103,7 @@ impl Controller {
 
 // A session is created and destroyed on its owning thread (CPAL streams can be !Send).
 struct Session {
+    published_metronome: Option<jam_protocol::MetronomeState>,
     buffer_frames: u32,
     #[cfg(feature = "telemetry-log")]
     log_preferences: Preferences,
@@ -158,6 +163,7 @@ impl Session {
                 Arc::clone(&stats),
             )?;
             let session = Self {
+                published_metronome: None,
                 buffer_frames: frames,
                 #[cfg(feature = "telemetry-log")]
                 log_preferences,
@@ -190,6 +196,15 @@ impl Session {
 }
 
 trait ActiveSession {
+    fn update_metronome(&mut self, _: jam_protocol::MetronomeConfig) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Metronome unavailable",
+        ))
+    }
+    fn metronome_update(&mut self) -> Option<jam_protocol::MetronomeState> {
+        None
+    }
     #[cfg(feature = "telemetry-log")]
     fn log_audio(&self) -> crate::telemetry_log::AudioInfo {
         crate::telemetry_log::AudioInfo::default()
@@ -212,6 +227,18 @@ trait ActiveSession {
 }
 
 impl ActiveSession for Session {
+    fn update_metronome(&mut self, config: jam_protocol::MetronomeConfig) -> io::Result<()> {
+        self.network.update_metronome(config)
+    }
+
+    fn metronome_update(&mut self) -> Option<jam_protocol::MetronomeState> {
+        let state = self.network.metronome_state()?;
+        if self.published_metronome == Some(state) {
+            return None;
+        }
+        self.published_metronome = Some(state);
+        Some(state)
+    }
     #[cfg(feature = "telemetry-log")]
     fn log_audio(&self) -> crate::telemetry_log::AudioInfo {
         crate::telemetry_log::AudioInfo {
@@ -246,6 +273,8 @@ impl ActiveSession for Session {
     }
     fn mixer_update(&mut self) -> Option<MixerView> {
         self.network.take_roster().map(|peers| MixerView {
+            local_peer_id: self.network.local_peer_id().unwrap_or(0),
+            metronome: Arc::clone(&self.rx.metronome),
             peers,
             stats: Arc::clone(&self.stats),
             controls: Arc::clone(&self.rx.controls),
@@ -310,6 +339,13 @@ fn control_loop<S: ActiveSession>(
         };
         match receive_command(commands, wait, session.is_some()) {
             Ok(command) => match command {
+                Command::Metronome(config) => {
+                    if let Some(active) = &mut session {
+                        if let Err(error) = active.update_metronome(config) {
+                            send(Event::Error(format!("Metronomo: {error}")));
+                        }
+                    }
+                }
                 Command::Connect(selected) => {
                     if session.is_none() {
                         preferences = selected;
@@ -411,6 +447,9 @@ fn publish_updates<S: ActiveSession>(
     #[cfg(feature = "telemetry-log")] log: &mut Option<crate::telemetry_log::AsyncSessionLog>,
     #[cfg(feature = "telemetry-log")] remote_peers: &mut u32,
 ) {
+    if let Some(state) = active.metronome_update() {
+        let _ = events.send(Event::Metronome(state));
+    }
     if let Some(view) = active.mixer_update() {
         #[cfg(feature = "telemetry-log")]
         {
