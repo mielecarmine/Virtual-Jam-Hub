@@ -2,6 +2,122 @@ use super::*;
 use rtrb::RingBuffer;
 
 #[test]
+fn room_clock_uses_minimum_rtt_and_rejects_unmatched_or_duplicate_pongs() {
+    for offset in [-500_000_i64, 2_000_000] {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut network = Network::connect(server.local_addr().unwrap(), "clock").unwrap();
+        assert_eq!(network.clock_offset_us(), None);
+        assert_eq!(network.server_timestamp_us(network.started), None);
+        for sample in 1..=128_u64 {
+            let sent_us = sample * 1_000_000;
+            let sent = network.started + Duration::from_micros(sent_us);
+            // Baseline symmetric 2ms RTT, with alternating outbound/inbound spikes.
+            let extra = if sample % 4 == 1 { 0 } else { 80_000 };
+            let outbound = 1_000 + if sample % 2 == 0 { extra } else { 0 };
+            let stamp = u64::try_from(i128::from(sent_us + outbound) + i128::from(offset)).unwrap();
+            let received = sent + Duration::from_micros(2_000 + extra);
+            network.pending_ping = Some((sent_us, sent));
+            network.pong(sent_us + 1, stamp, received);
+            assert_eq!(network.pending_ping, Some((sent_us, sent)));
+            network.pong(sent_us, stamp, received);
+            assert_eq!(network.clock_offset_us(), Some(offset));
+            let mapped =
+                u64::try_from(i128::from(sent_us + 2_000 + extra) + i128::from(offset)).unwrap();
+            assert_eq!(network.server_timestamp_us(received), Some(mapped));
+            network.pong(sent_us, u64::MAX, received);
+            assert_eq!(network.clock_offset_us(), Some(offset));
+        }
+    }
+}
+
+#[test]
+fn clock_window_ages_out_old_minimum_and_follows_changed_path_and_drift() {
+    let mut clock = ClockSync::default();
+    clock.observe(1_000_000, 1_001_100, Duration::from_micros(2_000));
+    assert_eq!(clock.offset_us(), Some(100));
+    for index in 1..=32 {
+        clock.observe(2_000_000, 2_002_200, Duration::from_micros(4_000));
+        assert_eq!(clock.offset_us(), Some(if index < 32 { 100 } else { 200 }));
+    }
+    // Equal-delay samples track drift rather than pinning the first sample forever.
+    clock.observe(3_000_000, 3_002_210, Duration::from_micros(4_000));
+    assert_eq!(clock.offset_us(), Some(210));
+    clock.observe(0, u64::MAX, Duration::ZERO);
+    assert_eq!(clock.offset_us(), Some(210));
+}
+
+#[test]
+fn receives_room_state_before_acceptance_and_sends_validated_commands() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "tempo").unwrap();
+    let config = MetronomeConfig {
+        enabled: true,
+        bpm: 180,
+        beats_per_bar: 3,
+        leader_peer_id: 2,
+    };
+    assert_eq!(network.metronome_state(), None);
+    assert_eq!(
+        network.update_metronome(config).unwrap_err().kind(),
+        io::ErrorKind::NotConnected
+    );
+    let (_, mut mic) = RingBuffer::new(4096);
+    let (mut speaker, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
+    let start = network.started;
+    network.tick(&mut mic, &mut speaker, start).unwrap();
+    let _ = receive(&server);
+    let state = MetronomeState {
+        config,
+        anchor_server_timestamp_us: 123_456,
+    };
+    send_control(
+        &server,
+        network.socket.local_addr().unwrap(),
+        &ControlMessage::MetronomeState { state },
+    );
+    wait_for_datagram(&network.socket);
+    network.tick(&mut mic, &mut speaker, start).unwrap();
+    assert_eq!(network.metronome_state(), Some(state));
+    send_control(
+        &server,
+        network.socket.local_addr().unwrap(),
+        &ControlMessage::JoinAccepted {
+            assigned_peer_id: 1,
+            sample_rate: SAMPLE_RATE,
+        },
+    );
+    wait_for_datagram(&network.socket);
+    network.tick(&mut mic, &mut speaker, start).unwrap();
+    let changed = MetronomeConfig { bpm: 200, ..config };
+    network.update_metronome(changed).unwrap();
+    assert_eq!(
+        ControlMessage::from_bytes(&receive(&server)),
+        Ok(ControlMessage::MetronomeUpdate { config: changed })
+    );
+    assert_eq!(network.metronome_state(), Some(state));
+    assert!(
+        network
+            .update_metronome(MetronomeConfig { bpm: 0, ..config })
+            .is_err()
+    );
+    let confirmed = MetronomeState {
+        config: changed,
+        anchor_server_timestamp_us: 999_999,
+    };
+    send_control(
+        &server,
+        network.socket.local_addr().unwrap(),
+        &ControlMessage::MetronomeState { state: confirmed },
+    );
+    wait_for_datagram(&network.socket);
+    network.tick(&mut mic, &mut speaker, start).unwrap();
+    assert_eq!(network.metronome_state(), Some(confirmed));
+}
+
+#[test]
 fn startup_at_256_frames_does_not_create_far_late_packets_or_resyncs() {
     for phase in [0, 1, 119, 255] {
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1078,11 +1194,11 @@ fn interval_peaks_reset_without_repeating_stale_rtt() {
     network.observe_tick(start + Duration::from_millis(16));
     network.observe_tick(start + Duration::from_millis(18));
     network.pending_ping = Some((1, start));
-    network.pong(2, start + Duration::from_millis(90));
+    network.pong(2, 0, start + Duration::from_millis(90));
     assert!(network.rtt_max_ms.is_none());
-    network.pong(1, start + Duration::from_millis(80));
+    network.pong(1, 0, start + Duration::from_millis(80));
     network.pending_ping = Some((2, start + Duration::from_millis(100)));
-    network.pong(2, start + Duration::from_millis(120));
+    network.pong(2, 0, start + Duration::from_millis(120));
     network.publish_telemetry(start + Duration::from_millis(500));
     let metrics = network.take_telemetry().unwrap();
     assert_eq!(metrics.rtt_ms, Some(20.0));

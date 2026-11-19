@@ -18,6 +18,246 @@ fn join() -> ControlMessage {
     }
 }
 
+fn room_client(server: &mut Server, now: Instant) -> UdpSocket {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    server
+        .sessions
+        .join(socket.local_addr().unwrap(), [0; NICKNAME_CAPACITY], 0, now)
+        .unwrap();
+    socket
+}
+
+fn receive_control(socket: &UdpSocket) -> ControlMessage {
+    let mut bytes = [0; MAX_PACKET_SIZE];
+    let length = socket.recv(&mut bytes).unwrap();
+    ControlMessage::from_bytes(&bytes[..length]).unwrap()
+}
+
+#[test]
+fn metronome_broadcast_join_and_server_owned_anchor() {
+    let mut server = Server::bind("127.0.0.1:0").unwrap();
+    let start = server.started;
+    let alice = room_client(&mut server, start);
+    let bob = room_client(&mut server, start);
+    let mut config = jam_protocol::MetronomeConfig {
+        enabled: true,
+        leader_peer_id: 1,
+        ..Default::default()
+    };
+    handle(
+        &mut server,
+        &ControlMessage::MetronomeUpdate { config },
+        alice.local_addr().unwrap(),
+        start + Duration::from_secs(1),
+    );
+    let first = server.metronome;
+    assert_eq!(first.anchor_server_timestamp_us, 1_000_000);
+    for client in [&alice, &bob] {
+        assert_eq!(
+            receive_control(client),
+            ControlMessage::MetronomeState { state: first }
+        );
+    }
+    // A retry and a meter/leader change preserve the room phase.
+    for change in [
+        config,
+        jam_protocol::MetronomeConfig {
+            beats_per_bar: 3,
+            leader_peer_id: 2,
+            ..config
+        },
+    ] {
+        handle(
+            &mut server,
+            &ControlMessage::MetronomeUpdate { config: change },
+            alice.local_addr().unwrap(),
+            start + Duration::from_secs(2),
+        );
+        assert_eq!(
+            server.metronome.anchor_server_timestamp_us,
+            first.anchor_server_timestamp_us
+        );
+        for client in [&alice, &bob] {
+            assert_eq!(
+                receive_control(client),
+                ControlMessage::MetronomeState {
+                    state: server.metronome
+                }
+            );
+        }
+    }
+    config.bpm = 140;
+    handle(
+        &mut server,
+        &ControlMessage::MetronomeUpdate { config },
+        bob.local_addr().unwrap(),
+        start + Duration::from_secs(3),
+    );
+    assert_eq!(server.metronome.anchor_server_timestamp_us, 3_000_000);
+    for client in [&alice, &bob] {
+        let _ = receive_control(client);
+    }
+    let carol = UdpSocket::bind("127.0.0.1:0").unwrap();
+    carol
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    handle(
+        &mut server,
+        &join(),
+        carol.local_addr().unwrap(),
+        start + Duration::from_secs(4),
+    );
+    assert!(matches!(
+        receive_control(&carol),
+        ControlMessage::JoinAccepted {
+            assigned_peer_id: 3,
+            ..
+        }
+    ));
+    assert!(
+        matches!(receive_control(&carol), ControlMessage::PeerListUpdate { peers } if peers.len() == 3)
+    );
+    assert_eq!(
+        receive_control(&carol),
+        ControlMessage::MetronomeState {
+            state: server.metronome
+        }
+    );
+}
+
+#[test]
+fn leader_departure_or_timeout_notifies_survivors_and_keeps_phase() {
+    for timeout in [false, true] {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let start = server.started;
+        let leader = room_client(&mut server, start);
+        let follower = room_client(&mut server, start);
+        server.metronome = MetronomeState {
+            config: jam_protocol::MetronomeConfig {
+                enabled: true,
+                leader_peer_id: 1,
+                ..Default::default()
+            },
+            anchor_server_timestamp_us: 123,
+        };
+        if timeout {
+            server
+                .sessions
+                .touch_source(follower.local_addr().unwrap(), start + SESSION_TIMEOUT);
+            server.expire_sessions(start + SESSION_TIMEOUT + Duration::from_micros(1));
+        } else {
+            handle(
+                &mut server,
+                &ControlMessage::Leave { peer_id: 1 },
+                leader.local_addr().unwrap(),
+                start,
+            );
+        }
+        assert_eq!(server.metronome.config.leader_peer_id, 0);
+        assert_eq!(server.metronome.anchor_server_timestamp_us, 123);
+        assert!(server.metronome.config.enabled);
+        assert!(
+            matches!(receive_control(&follower), ControlMessage::PeerListUpdate { peers } if peers.len() == 1)
+        );
+        assert_eq!(
+            receive_control(&follower),
+            ControlMessage::MetronomeState {
+                state: server.metronome
+            }
+        );
+        // The reused ID must not inherit leadership.
+        assert_eq!(
+            server.sessions.join(
+                leader.local_addr().unwrap(),
+                [0; NICKNAME_CAPACITY],
+                0,
+                start + SESSION_TIMEOUT
+            ),
+            Some(1)
+        );
+        assert_eq!(server.metronome.config.leader_peer_id, 0);
+    }
+}
+
+#[test]
+fn metronome_rejects_outsiders_inactive_leaders_and_forged_state() {
+    let mut server = Server::bind("127.0.0.1:0").unwrap();
+    let start = server.started;
+    let member = room_client(&mut server, start);
+    let outsider = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config = jam_protocol::MetronomeConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    handle(
+        &mut server,
+        &ControlMessage::MetronomeUpdate { config },
+        outsider.local_addr().unwrap(),
+        start,
+    );
+    handle(
+        &mut server,
+        &ControlMessage::MetronomeUpdate {
+            config: jam_protocol::MetronomeConfig {
+                leader_peer_id: 8,
+                ..config
+            },
+        },
+        member.local_addr().unwrap(),
+        start,
+    );
+    handle(
+        &mut server,
+        &ControlMessage::MetronomeState {
+            state: MetronomeState {
+                config,
+                anchor_server_timestamp_us: 123,
+            },
+        },
+        member.local_addr().unwrap(),
+        start,
+    );
+    assert_eq!(server.metronome, MetronomeState::default());
+    member.set_nonblocking(true).unwrap();
+    assert_eq!(
+        member.recv(&mut [0; MAX_PACKET_SIZE]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn disable_preserves_anchor_and_reenable_starts_new_beat_zero() {
+    let mut server = Server::bind("127.0.0.1:0").unwrap();
+    let start = server.started;
+    let client = room_client(&mut server, start);
+    for (second, enabled, anchor) in [
+        (1, true, 1_000_000),
+        (2, false, 1_000_000),
+        (3, true, 3_000_000),
+    ] {
+        let config = jam_protocol::MetronomeConfig {
+            enabled,
+            ..Default::default()
+        };
+        handle(
+            &mut server,
+            &ControlMessage::MetronomeUpdate { config },
+            client.local_addr().unwrap(),
+            start + Duration::from_secs(second),
+        );
+        assert_eq!(server.metronome.anchor_server_timestamp_us, anchor);
+        assert_eq!(
+            receive_control(&client),
+            ControlMessage::MetronomeState {
+                state: server.metronome
+            }
+        );
+    }
+}
+
 #[test]
 fn full_room_retries_and_lowest_free_id() {
     let mut table = SessionTable::default();

@@ -145,6 +145,9 @@ fn joins_broadcast_unique_ids_and_leave_reuses_the_first_free_id() {
         wait_for_peers(&bob, 2, Instant::now() + Duration::from_secs(1))[0].peer_id,
         1
     );
+    // Finish queued join notifications before closing destinations: Winsock can
+    // otherwise report ICMP port-unreachable as a receive-side connection reset.
+    drop(server);
 }
 
 #[test]
@@ -171,12 +174,14 @@ fn idle_client_is_removed_within_five_and_a_half_seconds() {
                 ControlMessage::PeerListUpdate { peers } if peers.len() == 1 => {
                     assert_eq!(peers[0].peer_id, active_id);
                     assert!(joined.elapsed() <= Duration::from_millis(5500));
+                    drop(server);
                     return;
                 }
                 ControlMessage::Pong {
                     client_timestamp_us,
                     ..
                 } => assert_eq!(client_timestamp_us, 42),
+                ControlMessage::MetronomeState { .. } => {}
                 message => panic!("Unexpected message: {message:?}"),
             },
             Err(error)
@@ -210,6 +215,7 @@ fn receive_timeout_keeps_poll_bounded_without_traffic() {
     let mut buffer = [0; MAX_PACKET_SIZE];
     client.recv(&mut buffer).unwrap(); // Accepted.
     client.recv(&mut buffer).unwrap(); // Initial peer list.
+    client.recv(&mut buffer).unwrap(); // Initial metronome state.
     let now = Instant::now();
     server.poll().unwrap(); // No traffic: returns after the bounded receive timeout.
     assert!(now.elapsed() < Duration::from_millis(500));

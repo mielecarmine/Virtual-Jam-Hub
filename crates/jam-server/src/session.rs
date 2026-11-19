@@ -22,6 +22,12 @@ pub(super) struct SessionTable {
 }
 
 impl SessionTable {
+    pub(super) fn contains_peer(&self, peer_id: u8) -> bool {
+        self.clients
+            .values()
+            .any(|session| session.peer_id == peer_id)
+    }
+
     pub(super) fn join(
         &mut self,
         source: SocketAddr,

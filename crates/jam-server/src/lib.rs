@@ -6,7 +6,7 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-use jam_protocol::{AudioHeader, ControlMessage, MAX_PACKET_SIZE, SAMPLE_RATE};
+use jam_protocol::{AudioHeader, ControlMessage, MAX_PACKET_SIZE, MetronomeState, SAMPLE_RATE};
 use session::SessionTable;
 
 /// Maximum idle wait between watchdog scans, even when no packets arrive.
@@ -19,6 +19,7 @@ pub struct Server {
     socket: UdpSocket,
     sessions: SessionTable,
     started: Instant,
+    metronome: MetronomeState,
     last_reflection_duration: Option<Duration>,
 }
 
@@ -34,6 +35,7 @@ impl Server {
             socket,
             sessions: SessionTable::default(),
             started: Instant::now(),
+            metronome: MetronomeState::default(),
             last_reflection_duration: None,
         })
     }
@@ -67,9 +69,7 @@ impl Server {
         let received = self.socket.recv_from(&mut buffer);
         let now = Instant::now();
         self.last_reflection_duration = None;
-        if self.sessions.expire(now) {
-            self.broadcast_peers();
-        }
+        self.expire_sessions(now);
         match received {
             Ok((length, source)) if length < MAX_PACKET_SIZE => {
                 self.handle(&buffer[..length], source, now);
@@ -126,6 +126,12 @@ impl Server {
                     source,
                 );
                 self.broadcast_peers();
+                self.send(
+                    &ControlMessage::MetronomeState {
+                        state: self.metronome,
+                    },
+                    source,
+                );
             }
             ControlMessage::Ping {
                 client_timestamp_us,
@@ -146,11 +152,56 @@ impl Server {
             ControlMessage::Leave { peer_id } => {
                 if self.sessions.remove(source, peer_id) {
                     self.broadcast_peers();
+                    self.reset_missing_leader();
+                }
+            }
+            ControlMessage::MetronomeUpdate { config } => {
+                // Only room members may change tempo; a designated leader must be active.
+                if (config.leader_peer_id == 0
+                    || self.sessions.contains_peer(config.leader_peer_id))
+                    && self.sessions.touch_source(source, now)
+                {
+                    if (config.enabled && !self.metronome.config.enabled)
+                        || config.bpm != self.metronome.config.bpm
+                    {
+                        self.metronome.anchor_server_timestamp_us =
+                            u64::try_from(now.duration_since(self.started).as_micros())
+                                .unwrap_or(u64::MAX);
+                    }
+                    self.metronome.config = config;
+                    self.broadcast_metronome();
                 }
             }
             ControlMessage::JoinAccepted { .. }
             | ControlMessage::PeerListUpdate { .. }
-            | ControlMessage::Pong { .. } => {}
+            | ControlMessage::Pong { .. }
+            | ControlMessage::MetronomeState { .. } => {}
+        }
+    }
+
+    fn expire_sessions(&mut self, now: Instant) {
+        if self.sessions.expire(now) {
+            self.broadcast_peers();
+            self.reset_missing_leader();
+        }
+    }
+
+    fn reset_missing_leader(&mut self) {
+        let leader = self.metronome.config.leader_peer_id;
+        if leader != 0 && !self.sessions.contains_peer(leader) {
+            self.metronome.config.leader_peer_id = 0;
+            self.broadcast_metronome();
+        }
+    }
+
+    fn broadcast_metronome(&self) {
+        for destination in self.sessions.addresses() {
+            self.send(
+                &ControlMessage::MetronomeState {
+                    state: self.metronome,
+                },
+                destination,
+            );
         }
     }
 

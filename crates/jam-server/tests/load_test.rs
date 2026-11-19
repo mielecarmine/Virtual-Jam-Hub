@@ -52,6 +52,7 @@ fn join_room(socket: &UdpSocket) -> u8 {
                 assigned_peer_id, ..
             } => peer_id = Some(assigned_peer_id),
             ControlMessage::PeerListUpdate { peers } => full_room = peers.len() == BOT_COUNT,
+            ControlMessage::MetronomeState { .. } => {}
             message => panic!("unexpected startup message: {message:?}"),
         }
     }
@@ -73,6 +74,13 @@ fn receive_audio(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => panic!("bot {} receive failed: {error}", report.peer_id),
         };
+        // The initial room state can follow the final roster datagram.
+        if matches!(
+            ControlMessage::from_bytes(&buffer[..length]),
+            Ok(ControlMessage::MetronomeState { .. })
+        ) {
+            continue;
+        }
         let header = AudioHeader::from_bytes(&buffer[..length]).unwrap();
         assert_eq!(length, PACKET_BYTES);
         assert_ne!(header.peer_id, report.peer_id, "server echoed local audio");

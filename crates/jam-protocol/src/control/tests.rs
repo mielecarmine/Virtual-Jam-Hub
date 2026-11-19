@@ -1,6 +1,6 @@
 use crate::{
-    ControlMessage, MAX_PACKET_SIZE, MAX_PEERS, NICKNAME_CAPACITY, PROTOCOL_MAGIC, PeerInfo,
-    ProtocolError, SAMPLE_RATE,
+    ControlMessage, MAX_PACKET_SIZE, MAX_PEERS, MetronomeConfig, MetronomeState, NICKNAME_CAPACITY,
+    PROTOCOL_MAGIC, PeerInfo, ProtocolError, SAMPLE_RATE,
 };
 
 fn peer(peer_id: u8) -> PeerInfo {
@@ -8,6 +8,153 @@ fn peer(peer_id: u8) -> PeerInfo {
         peer_id,
         nickname: [b'A'; NICKNAME_CAPACITY],
         nickname_len: 32,
+    }
+}
+
+#[test]
+fn metronome_wire_layout_and_all_valid_boundaries() {
+    for enabled in [false, true] {
+        for bpm in [30_u16, 300] {
+            for beats_per_bar in [1, 16] {
+                for leader_peer_id in [0, 8] {
+                    let config = MetronomeConfig {
+                        enabled,
+                        bpm,
+                        beats_per_bar,
+                        leader_peer_id,
+                    };
+                    let state = MetronomeState {
+                        config,
+                        anchor_server_timestamp_us: 0x0807_0605_0403_0201,
+                    };
+                    for (message, kind, size) in [
+                        (ControlMessage::MetronomeUpdate { config }, 8, 8),
+                        (ControlMessage::MetronomeState { state }, 9, 16),
+                    ] {
+                        let mut wire = [0; 16];
+                        assert_eq!(message.to_bytes(&mut wire), Ok(size));
+                        let [lo, hi] = bpm.to_le_bytes();
+                        assert_eq!(
+                            wire[..8],
+                            [
+                                0x41,
+                                0x4a,
+                                kind,
+                                u8::from(enabled),
+                                lo,
+                                hi,
+                                beats_per_bar,
+                                leader_peer_id
+                            ]
+                        );
+                        if size == 16 {
+                            assert_eq!(wire[8..], [1, 2, 3, 4, 5, 6, 7, 8]);
+                        }
+                        assert_eq!(ControlMessage::from_bytes(&wire[..size]), Ok(message));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn metronome_invalid_fields_are_rejected_on_both_paths_without_writes() {
+    let base = MetronomeConfig::default();
+    for (config, error) in [
+        (
+            MetronomeConfig { bpm: 0, ..base },
+            ProtocolError::InvalidBpm(0),
+        ),
+        (
+            MetronomeConfig { bpm: 29, ..base },
+            ProtocolError::InvalidBpm(29),
+        ),
+        (
+            MetronomeConfig { bpm: 301, ..base },
+            ProtocolError::InvalidBpm(301),
+        ),
+        (
+            MetronomeConfig {
+                bpm: u16::MAX,
+                ..base
+            },
+            ProtocolError::InvalidBpm(u16::MAX),
+        ),
+        (
+            MetronomeConfig {
+                beats_per_bar: 0,
+                ..base
+            },
+            ProtocolError::InvalidBeatsPerBar(0),
+        ),
+        (
+            MetronomeConfig {
+                beats_per_bar: 17,
+                ..base
+            },
+            ProtocolError::InvalidBeatsPerBar(17),
+        ),
+        (
+            MetronomeConfig {
+                beats_per_bar: 255,
+                ..base
+            },
+            ProtocolError::InvalidBeatsPerBar(255),
+        ),
+        (
+            MetronomeConfig {
+                leader_peer_id: 9,
+                ..base
+            },
+            ProtocolError::InvalidPeerId(9),
+        ),
+        (
+            MetronomeConfig {
+                leader_peer_id: 255,
+                ..base
+            },
+            ProtocolError::InvalidPeerId(255),
+        ),
+    ] {
+        for message in [
+            ControlMessage::MetronomeUpdate { config },
+            ControlMessage::MetronomeState {
+                state: MetronomeState {
+                    config,
+                    anchor_server_timestamp_us: 0,
+                },
+            },
+        ] {
+            let mut output = [0xcc; 16];
+            assert_eq!(message.to_bytes(&mut output), Err(error));
+            assert_eq!(output, [0xcc; 16]);
+        }
+        for kind in [8, 9] {
+            let mut wire = [0; 16];
+            wire[..8].copy_from_slice(&[
+                0x41,
+                0x4a,
+                kind,
+                0,
+                config.bpm.to_le_bytes()[0],
+                config.bpm.to_le_bytes()[1],
+                config.beats_per_bar,
+                config.leader_peer_id,
+            ]);
+            let size = if kind == 8 { 8 } else { 16 };
+            assert_eq!(ControlMessage::from_bytes(&wire[..size]), Err(error));
+        }
+    }
+    for kind in [8, 9] {
+        for invalid in [2, 255] {
+            let mut wire = [0; 16];
+            wire[..8].copy_from_slice(&[0x41, 0x4a, kind, invalid, 120, 0, 4, 0]);
+            assert_eq!(
+                ControlMessage::from_bytes(&wire[..if kind == 8 { 8 } else { 16 }]),
+                Err(ProtocolError::InvalidBoolean(invalid))
+            );
+        }
     }
 }
 
@@ -40,6 +187,23 @@ fn messages() -> Vec<ControlMessage> {
             server_timestamp_us: 0x0807_0605_0403_0201,
         },
         ControlMessage::Leave { peer_id: 1 },
+        ControlMessage::MetronomeUpdate {
+            config: MetronomeConfig::default(),
+        },
+        ControlMessage::MetronomeState {
+            state: MetronomeState::default(),
+        },
+        ControlMessage::MetronomeState {
+            state: MetronomeState {
+                config: MetronomeConfig {
+                    enabled: true,
+                    bpm: 300,
+                    beats_per_bar: 16,
+                    leader_peer_id: 8,
+                },
+                anchor_server_timestamp_us: u64::MAX,
+            },
+        },
     ]
 }
 
@@ -151,7 +315,7 @@ fn invalid_magic_unknown_types_and_oversized_packets_are_rejected() {
         ControlMessage::from_bytes(&[0, 0, 5]),
         Err(ProtocolError::InvalidMagic)
     );
-    for kind in [0, 1, 8, 255] {
+    for kind in [0, 1, 10, 255] {
         assert_eq!(
             ControlMessage::from_bytes(&[0x41, 0x4A, kind]),
             Err(ProtocolError::UnknownMessageType(kind))
