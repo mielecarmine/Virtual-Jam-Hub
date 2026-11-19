@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn latency_columns_and_summary_preserve_components_and_missing_rtt() {
+    let path = crate::setup::tests::temporary_path("telemetry-latency");
+    let mut log = SessionLog::start(&path, &Preferences::default(), AudioInfo::default()).unwrap();
+    for rtt in [Some(24.0), None] {
+        log.record_at(
+            0.5,
+            1,
+            Telemetry {
+                latency: Some(crate::network::telemetry::LatencyBudget::estimate(
+                    120, 120, 120, rtt, 7.5,
+                )),
+                ..Telemetry::default()
+            },
+            [0; 2],
+        )
+        .unwrap();
+    }
+    drop(log);
+    let file = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let text = std::fs::read_to_string(file).unwrap();
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.starts_with("elapsed_s"));
+    let names: Vec<_> = lines.next().unwrap().split('\t').collect();
+    let complete: Vec<_> = lines.next().unwrap().split('\t').collect();
+    let missing: Vec<_> = lines.next().unwrap().split('\t').collect();
+    for (name, expected, unavailable) in [
+        ("audio_io_ms", "5.000", "5.000"),
+        ("codec_ms", "5.000", "5.000"),
+        ("network_one_way_ms", "12.000", "N/A"),
+        ("rx_buffer_ms", "25.000", "25.000"),
+        ("total_one_way_ms", "47.000", "N/A"),
+        ("headroom_ms", "-22.000", "N/A"),
+        ("latency_class", "2.000", "N/A"),
+    ] {
+        let index = names.iter().position(|column| *column == name).unwrap();
+        assert_eq!(complete[index], expected, "{name}");
+        assert_eq!(missing[index], unavailable, "{name}");
+        let count = if unavailable == "N/A" { 1 } else { 2 };
+        assert!(
+            text.contains(&format!(
+                "{name}\t{count}\t{expected}\t{expected}\t{expected}\t{expected}"
+            )),
+            "{name}"
+        );
+    }
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn captured_timestamp_is_preserved_independently_of_writer_delay() {
     let path = crate::setup::tests::temporary_path("telemetry-timestamp");
     let mut log = SessionLog::start(&path, &Preferences::default(), AudioInfo::default()).unwrap();
@@ -119,6 +174,7 @@ fn extended_columns_preserve_units_peaks_counters_and_device_configuration() {
     };
     let mut log = SessionLog::start(&path, &Preferences::default(), audio).unwrap();
     let metrics = Telemetry {
+        latency: None,
         rtt_ms: Some(23.0),
         rtt_max_ms: Some(81.0),
         worker_max_gap_ms: 15.625,

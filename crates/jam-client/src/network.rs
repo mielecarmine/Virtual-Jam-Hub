@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod telemetry;
+pub(crate) mod telemetry;
 use telemetry::ArrivalStats;
 pub use telemetry::Telemetry;
 
@@ -65,6 +65,7 @@ pub struct Network {
     roster: Vec<jam_protocol::PeerInfo>,
     roster_changed: bool,
     encoder: opus::Encoder,
+    pub codec_lookahead_samples: u32,
     settings: Settings,
     peers: BTreeMap<u8, PeerJitterBuffer>,
     delayed: Vec<Delayed>,
@@ -96,6 +97,10 @@ impl Network {
         let mut bytes = [0; NICKNAME_CAPACITY];
         bytes[..nickname.len()].copy_from_slice(nickname.as_bytes());
         let now = Instant::now();
+        let mut encoder = codec::encoder().map_err(io::Error::other)?;
+        let codec_lookahead_samples =
+            u32::try_from(encoder.get_lookahead().map_err(io::Error::other)?)
+                .map_err(io::Error::other)?;
         Ok(Self {
             arrivals: BTreeMap::new(),
             telemetry: None,
@@ -108,7 +113,8 @@ impl Network {
             pending_ping: None,
             roster: Vec::new(),
             roster_changed: false,
-            encoder: codec::encoder().map_err(io::Error::other)?,
+            encoder,
+            codec_lookahead_samples,
             settings: Settings::default(),
             peers: BTreeMap::new(),
             delayed: Vec::new(),
@@ -429,6 +435,7 @@ impl Network {
             diagnostics.accumulate(peer.diagnostics);
         }
         self.telemetry = Some(Telemetry {
+            latency: None,
             diagnostics,
             audio: crate::audio::AudioTelemetry::default(),
             worker_max_gap_ms: std::mem::take(&mut self.worker_max_gap_ms),

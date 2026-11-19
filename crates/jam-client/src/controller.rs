@@ -99,6 +99,7 @@ impl Controller {
 
 // A session is created and destroyed on its owning thread (CPAL streams can be !Send).
 struct Session {
+    buffer_frames: u32,
     #[cfg(feature = "telemetry-log")]
     log_preferences: Preferences,
     #[cfg(feature = "telemetry-log")]
@@ -157,6 +158,7 @@ impl Session {
                 Arc::clone(&stats),
             )?;
             let session = Self {
+                buffer_frames: frames,
                 #[cfg(feature = "telemetry-log")]
                 log_preferences,
                 #[cfg(feature = "telemetry-log")]
@@ -232,6 +234,13 @@ impl ActiveSession for Session {
     fn telemetry_update(&mut self) -> Option<crate::network::Telemetry> {
         self.network.take_telemetry().map(|mut metrics| {
             metrics.audio = self.stats.telemetry();
+            metrics.latency = Some(crate::network::telemetry::LatencyBudget::estimate(
+                self.buffer_frames,
+                metrics.audio.last_output_frames,
+                self.network.codec_lookahead_samples,
+                metrics.rtt_ms,
+                metrics.buffer_ms,
+            ));
             metrics
         })
     }

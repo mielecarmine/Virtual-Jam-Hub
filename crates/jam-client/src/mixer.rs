@@ -11,7 +11,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::{audio::Stats, codec::FRAME_SAMPLES};
 
 // 15 ms scheduling reserve plus one production interval (2.5 ms) at 48 kHz.
-const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 7;
+pub(crate) const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 7;
 
 // 1 ms at 48 kHz; tolerate one Opus interval before rebuilding the reserve.
 const FADE_SAMPLES: u16 = 48;

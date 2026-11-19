@@ -555,6 +555,30 @@ variabile e controllare movimento fluido, marker di picco, mute/fader e reset
 alla riconnessione. La fluidità effettiva a 60 fps e la sincronia con una scheda
 audio fisica richiedono questa prova sul desktop.
 
+### Budget di latenza end-to-end — JAM-31
+
+La barra di stato mostra «Latenza E2E: ~X.X ms» con tre fasce: verde sotto
+20 ms, giallo da 20 a 25 ms inclusi, rosso oltre 25 ms (rischio tempo-drag).
+Il tooltip scompone la stima one-way in audio I/O locale (buffer di cattura
+richiesto più ultimo blocco di output osservato, con fallback al buffer richiesto),
+frame Opus da 2,5 ms più lookahead interrogato sull'encoder, RTT server / 2 e
+massimo audio codificato accodato tra peer più riserva SPSC del mixer.
+Il margine rispetto a 25 ms può essere negativo. Con l'attuale riserva di
+840 campioni (17,5 ms), anche una rete molto veloce lascia poco margine.
+
+È un budget stimato a 48 kHz: RTT server / 2 è un'approssimazione della rete,
+non una misura del percorso audio completo tra musicisti; la configurazione
+hardware remota e le latenze interne del driver non sono misurate. Senza RTT
+valido, anche dopo la scadenza della misura, totale, margine e classificazione
+restano indisponibili. Il calcolo avviene nel controller ogni 500 ms, senza
+modifiche ai callback audio. Il logger `telemetry-log` registra le componenti,
+totale, margine e classe numerica (0 ottimale, 1 limite, 2 tempo-drag) anche nel
+riepilogo; i valori indisponibili sono `N/A` ed esclusi dalle statistiche.
+
+Verifica manuale: durante una sessione aprire il tooltip, controllare che le
+componenti sommino al totale e che il margine sia `25 - totale`; confrontare
+con il log della stessa sessione e verificare il reset alla disconnessione.
+
 ### Release beta e installer
 
 Gli installer desktop sono disponibili nelle [release GitHub](https://github.com/mielecarmine/Virtual-Jam-Hub/releases).
