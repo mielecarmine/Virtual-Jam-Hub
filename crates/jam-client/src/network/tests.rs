@@ -2,6 +2,63 @@ use super::*;
 use rtrb::RingBuffer;
 
 #[test]
+fn room_click_waits_for_clock_then_renders_without_peers_and_ignores_tick_jitter() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "click").unwrap();
+    let (mut rx, mut mixer) = crate::mixer::channels(128);
+    let stats = crate::audio::Stats::default();
+    let room = MetronomeState {
+        config: MetronomeConfig {
+            enabled: true,
+            bpm: 300,
+            ..MetronomeConfig::default()
+        },
+        anchor_server_timestamp_us: 1_000_000,
+    };
+    network.metronome = Some(room);
+    network.sync_metronome(&mut rx, network.started);
+    let mut output = [1.0_f32; 128];
+    mixer.playback(&mut output, 1, &stats);
+    assert_eq!(output, [0.0; 128]);
+    assert_eq!(network.rendered_metronome, None);
+
+    // Server clock starts one second ahead of the local clock. No remote audio required.
+    network.clock.observe(0, 1_000_000, Duration::ZERO);
+    network.sync_metronome(&mut rx, network.started);
+    mixer.playback(&mut output, 1, &stats);
+    assert_eq!(output[0], 0.0);
+    assert!(output[1] > 0.0);
+    rx.metronome
+        .gain
+        .store(0.25_f32.to_bits(), Ordering::Relaxed);
+    rx.metronome.mute.store(true, Ordering::Relaxed);
+
+    // Ordinary worker ticks and meter-only changes must never remap the sample epoch.
+    network.sync_metronome(&mut rx, network.started + Duration::from_millis(456));
+    network.metronome.as_mut().unwrap().config.beats_per_bar = 3;
+    network.sync_metronome(&mut rx, network.started + Duration::from_millis(789));
+    for _ in 0..80 {
+        mixer.playback(&mut output, 1, &stats);
+    }
+    assert_eq!(rx.metronome.current_beat.load(Ordering::Relaxed), 1);
+    assert_eq!(network.metronome_state().unwrap().config.bpm, 300);
+    assert!(network.metronome_state().unwrap().config.enabled);
+    assert_eq!(
+        f32::from_bits(rx.metronome.gain.load(Ordering::Relaxed)),
+        0.25
+    );
+    assert!(rx.metronome.mute.load(Ordering::Relaxed));
+
+    // A corrected clock epoch propagates without resetting local monitoring controls.
+    network.clock.observe(0, 1_005_000, Duration::ZERO);
+    network.sync_metronome(&mut rx, network.started + Duration::from_millis(789));
+    assert_eq!(network.rendered_metronome.unwrap().1, 1_005_000);
+    mixer.playback(&mut output, 1, &stats);
+    assert_eq!(output, [0.0; 128]);
+    assert!(rx.metronome.mute.load(Ordering::Relaxed));
+}
+
+#[test]
 fn room_clock_uses_minimum_rtt_and_rejects_unmatched_or_duplicate_pongs() {
     for offset in [-500_000_i64, 2_000_000] {
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
