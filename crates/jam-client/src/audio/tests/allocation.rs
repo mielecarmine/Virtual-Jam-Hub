@@ -171,3 +171,34 @@ fn mixer_micro_underflow_fades_and_refill_do_not_allocate() {
     assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 121);
     assert_eq!(stats.telemetry().align_dropped_samples, 1);
 }
+
+#[test]
+fn metronome_clicks_reconfiguration_and_local_controls_do_not_allocate() {
+    let (mut rx, mut mixer) = crate::mixer::channels(128);
+    let stats = Stats::default();
+    let mut output = [0.0_f32; 256];
+    let mut integer_output = [0_i16; 512];
+    assert_no_allocations(|| {
+        for bpm in [30, 137, 300] {
+            rx.sync_metronome(
+                jam_protocol::MetronomeConfig {
+                    enabled: true,
+                    bpm,
+                    beats_per_bar: 3,
+                    ..jam_protocol::MetronomeConfig::default()
+                },
+                0,
+            );
+            for block in 0..400 {
+                rx.metronome.mute.store(block % 4 == 0, Ordering::Relaxed);
+                rx.metronome
+                    .gain
+                    .store(0.25_f32.to_bits(), Ordering::Relaxed);
+                mixer.playback(&mut output, 1, &stats);
+                mixer.playback(&mut integer_output, 2, &stats);
+            }
+        }
+        rx.sync_metronome(jam_protocol::MetronomeConfig::default(), 0);
+        mixer.playback(&mut output, 1, &stats);
+    });
+}

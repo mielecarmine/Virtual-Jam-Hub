@@ -843,3 +843,34 @@ JAM-32 non genera audio del click e non lo trasmette in rete.
 I test coprono layout e limiti dei nuovi messaggi, broadcast, join, reset del
 leader e riuso degli ID, oltre a offset positivi/negativi, jitter asimmetrico,
 Pong duplicati/non corrispondenti e ricambio della finestra del filtro.
+
+### Sintetizzatore locale del metronomo — JAM-33
+
+`Mixer::playback` sintetizza il click a 48 kHz e lo somma al bus prima del
+soft-clipping: downbeat a 1200 Hz, altri battiti a 800 Hz con ampiezza ridotta,
+impulsi di 20 ms con decadimento esponenziale e bordi raccordati. La fase usa
+aritmetica intera e un contatore campioni: anche BPM come 73 o 137 non accumulano
+errori di arrotondamento. Un cambio di BPM, fase, metrica o abilitazione lascia
+terminare l'impulso già iniziato; una nuova scadenza durante quell'impulso non
+lo interrompe. Gain e mute locali hanno una rampa di 1 ms.
+
+`RxChannels::metronome` espone l'`Arc<MetronomeControls>` con gain, mute e beat
+corrente atomici. I controlli locali non modificano lo stato di stanza né il
+segnale di cattura inviato via UDP; mute e solo dei canali audio non fermano il
+click. Il worker pubblica configurazione e ancora in campioni soltanto dopo
+aver ricevuto stato autorevole e stima del clock, aggiornandoli ai cambi di
+stato/offset. Cambi di sola metrica o leader preservano l'epoca audio. La
+callback legge uno snapshot atomico con un solo tentativo, conservando il
+precedente se il worker sta scrivendo: nessun lock, attesa, allocazione o lettura
+di `Instant` nel sintetizzatore.
+
+La precisione al campione riguarda la cadenza locale. La correlazione iniziale
+tra clock di stanza e cursore audio usa l'ultimo blocco renderizzato: fase
+assoluta fra dispositivi, latenza hardware e deriva del clock audio richiedono
+verifica su hardware reale e non sono misurate dai test deterministici.
+Controlli GUI e compensazione Tempo Leader appartengono a JAM-34.
+
+I test coprono periodi interi/frazionari, accenti, callback da 64/128/256 frame,
+ancore future, transizioni durante un impulso, gain/mute locali, pubblicazioni
+interrotte e integrazione con il clock del worker senza peer audio. La suite
+`audio::tests::allocation` verifica anche il metronomo attivo e riconfigurato.

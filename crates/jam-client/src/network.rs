@@ -66,6 +66,7 @@ pub struct Network {
     pending_ping: Option<(u64, Instant)>,
     clock: ClockSync,
     metronome: Option<MetronomeState>,
+    rendered_metronome: Option<(MetronomeState, i64)>,
     roster: Vec<jam_protocol::PeerInfo>,
     roster_changed: bool,
     encoder: opus::Encoder,
@@ -117,6 +118,7 @@ impl Network {
             pending_ping: None,
             clock: ClockSync::default(),
             metronome: None,
+            rendered_metronome: None,
             roster: Vec::new(),
             roster_changed: false,
             encoder,
@@ -399,6 +401,7 @@ impl Network {
                 self.incoming(bytes, id, now);
             }
         }
+        self.sync_metronome(speaker, now);
         self.playback(speaker, now)?;
         self.publish_telemetry(now);
         let Some(id) = self.peer_id else {
@@ -438,21 +441,40 @@ impl Network {
 
     /// Server clock minus local microseconds since this connection started.
     /// Uses the lowest RTT among the last 32 matched Pong samples.
-    #[allow(dead_code)] // Consumed by the metronome mixer/GUI in JAM-33 and JAM-34.
     pub fn clock_offset_us(&self) -> Option<i64> {
         self.clock.offset_us()
     }
 
     /// Estimated room time, in the same clock domain as the metronome anchor.
-    #[allow(dead_code)] // Clock API for JAM-33.
     pub fn server_timestamp_us(&self, now: Instant) -> Option<u64> {
         let local = i128::try_from(now.checked_duration_since(self.started)?.as_micros()).ok()?;
         u64::try_from(local + i128::from(self.clock_offset_us()?)).ok()
     }
 
-    #[allow(dead_code)] // Synchronized state API for JAM-33/JAM-34.
     pub fn metronome_state(&self) -> Option<MetronomeState> {
         self.metronome
+    }
+
+    fn sync_metronome(&mut self, speaker: &mut RxChannels, now: Instant) {
+        let (Some(state), Some(offset), Some(server_us)) = (
+            self.metronome_state(),
+            self.clock_offset_us(),
+            self.server_timestamp_us(now),
+        ) else {
+            return; // Stay silent until both room state and clock are known.
+        };
+        if self.rendered_metronome != Some((state, offset)) {
+            if self.rendered_metronome.is_some_and(|(old, old_offset)| {
+                old.anchor_server_timestamp_us == state.anchor_server_timestamp_us
+                    && old_offset == offset
+            }) {
+                speaker.configure_metronome(state.config);
+            } else {
+                let elapsed = i128::from(server_us) - i128::from(state.anchor_server_timestamp_us);
+                speaker.sync_metronome(state.config, elapsed);
+            }
+            self.rendered_metronome = Some((state, offset));
+        }
     }
 
     /// Sends a room configuration command; local state changes on server confirmation.

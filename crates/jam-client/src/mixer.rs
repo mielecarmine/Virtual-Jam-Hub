@@ -10,6 +10,10 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::{audio::Stats, codec::FRAME_SAMPLES};
 
+mod metronome;
+use metronome::Metronome;
+pub use metronome::MetronomeControls;
+
 // 15 ms scheduling reserve plus one production interval (2.5 ms) at 48 kHz.
 pub(crate) const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 7;
 
@@ -89,6 +93,7 @@ pub struct RxChannels {
     pub rings: [Producer<QueuedSample>; MAX_PEERS],
     pub controls: Arc<[Controls; MAX_PEERS]>,
     pub local_control: Arc<Controls>,
+    pub metronome: Arc<MetronomeControls>,
 }
 
 pub struct Mixer {
@@ -99,6 +104,7 @@ pub struct Mixer {
     epochs: [u32; MAX_PEERS],
     ready: [bool; MAX_PEERS],
     continuity: [Continuity; MAX_PEERS],
+    metronome: Metronome,
 }
 
 pub fn channels(frames: usize) -> (RxChannels, Mixer) {
@@ -108,6 +114,7 @@ pub fn channels(frames: usize) -> (RxChannels, Mixer) {
 pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
     let controls = Arc::new(std::array::from_fn(|_| Controls::default()));
     let local_control = Arc::new(Controls::default());
+    let metronome = Arc::new(MetronomeControls::default());
     let pairs = std::array::from_fn::<_, MAX_PEERS, _>(|_| RingBuffer::new(capacity));
     let (producers, consumers): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
     let rings = producers.try_into().unwrap_or_else(|_| unreachable!());
@@ -115,6 +122,7 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
         rings,
         controls: Arc::clone(&controls),
         local_control: Arc::clone(&local_control),
+        metronome: Arc::clone(&metronome),
     };
     let rings = consumers.try_into().unwrap_or_else(|_| unreachable!());
     (
@@ -127,6 +135,7 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
             epochs: [0; MAX_PEERS],
             ready: [false; MAX_PEERS],
             continuity: [Continuity::default(); MAX_PEERS],
+            metronome: Metronome::new(metronome),
         },
     )
 }
@@ -223,6 +232,29 @@ impl Mixer {
         }
     }
 
+    fn local_sample(&mut self, solo: bool, stats: &Stats) -> f64 {
+        let Some(local) = &mut self.local else {
+            return 0.0;
+        };
+        // Always consume, including while muted or excluded by a remote solo.
+        let sample = local.pop();
+        if sample.is_some() {
+            stats.playback_started.store(true, Ordering::Relaxed);
+        }
+        let value = sample.unwrap_or(0.0);
+        let control = &self.local_control;
+        let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
+        if value.is_finite()
+            && gain.is_finite()
+            && !control.mute.load(Ordering::Relaxed)
+            && (!solo || control.solo.load(Ordering::Relaxed))
+        {
+            f64::from(value) * f64::from(gain)
+        } else {
+            0.0
+        }
+    }
+
     pub fn playback<T: Sample + FromSample<f32>>(
         &mut self,
         data: &mut [T],
@@ -243,30 +275,14 @@ impl Mixer {
             local.align(data.len() / channels);
         }
         self.align(data.len() / channels, stats);
+        self.metronome.begin_block();
         let mut peaks = [0.0_f32; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
             let solo = (self.local.is_some() && self.local_control.solo.load(Ordering::Relaxed))
                 || self.controls.iter().any(|c| {
                     c.epoch.load(Ordering::Relaxed) % 2 != 0 && c.solo.load(Ordering::Relaxed)
                 });
-            let mut sum = 0.0;
-            if let Some(local) = &mut self.local {
-                // Always consume, including while muted or excluded by a remote solo.
-                let sample = local.pop();
-                if sample.is_some() {
-                    stats.playback_started.store(true, Ordering::Relaxed);
-                }
-                let value = sample.unwrap_or(0.0);
-                let control = &self.local_control;
-                let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
-                if value.is_finite()
-                    && gain.is_finite()
-                    && !control.mute.load(Ordering::Relaxed)
-                    && (!solo || control.solo.load(Ordering::Relaxed))
-                {
-                    sum += f64::from(value) * f64::from(gain);
-                }
-            }
+            let mut sum = self.local_sample(solo, stats);
             for (index, ((ring, control), peak)) in self
                 .rings
                 .iter_mut()
@@ -327,10 +343,12 @@ impl Mixer {
                     sum += f64::from(value) * f64::from(gain);
                 }
             }
+            sum += self.metronome.next_sample();
             #[allow(clippy::cast_possible_truncation)]
             let output = sum.tanh() as f32;
             frame.fill(T::from_sample(output));
         }
+        self.metronome.end_block();
         for (control, peak) in self.controls.iter().zip(peaks) {
             control.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
         }

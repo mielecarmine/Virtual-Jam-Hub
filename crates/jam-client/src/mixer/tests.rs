@@ -1,5 +1,194 @@
 use super::*;
 
+fn click_config(bpm: u16, beats_per_bar: u8) -> jam_protocol::MetronomeConfig {
+    jam_protocol::MetronomeConfig {
+        enabled: true,
+        bpm,
+        beats_per_bar,
+        ..jam_protocol::MetronomeConfig::default()
+    }
+}
+
+#[test]
+fn metronome_is_added_before_clipping_and_remains_audible_during_channel_solo() {
+    let (mut rx, mut mixer) = channels(128);
+    let (mut click_rx, mut click_only) = channels(128);
+    let stats = Stats::default();
+    rx.sync_metronome(click_config(120, 4), 0);
+    click_rx.sync_metronome(click_config(120, 4), 0);
+    rx.controls[0].solo.store(true, Ordering::Relaxed);
+    assert!(rx.push(1, &[0.8; RX_TARGET_SAMPLES + 128]));
+    let mut output = [0.0_f32; 256];
+    let mut click = [0.0_f32; 128];
+    mixer.playback(&mut output, 2, &stats);
+    click_only.playback(&mut click, 1, &stats);
+    for (frame, sample) in output.chunks_exact(2).zip(click) {
+        let expected = (0.8 + sample.atanh()).tanh();
+        assert!((frame[0] - expected).abs() < 1e-6);
+        assert_eq!(frame[0], frame[1]);
+    }
+}
+
+#[test]
+fn metronome_local_gain_scales_amplitude_without_changing_sample_phase() {
+    let (mut rx, mut full) = channels(128);
+    let (mut quiet_rx, mut quiet) = channels(128);
+    let stats = Stats::default();
+    rx.sync_metronome(click_config(300, 3), 0);
+    quiet_rx.sync_metronome(click_config(300, 3), 0);
+    quiet_rx
+        .metronome
+        .gain
+        .store(0.25_f32.to_bits(), Ordering::Relaxed);
+    let mut full_samples = vec![0.0_f32; 10_560];
+    let mut quiet_samples = full_samples.clone();
+    full.playback(&mut full_samples, 1, &stats);
+    quiet.playback(&mut quiet_samples, 1, &stats);
+    // After the gain ramp, compare the next complete beat before clipping.
+    for (full, quiet) in full_samples[9600..].iter().zip(&quiet_samples[9600..]) {
+        assert!((quiet.atanh() - full.atanh() * 0.5).abs() < 1e-6);
+    }
+    assert_eq!(rx.metronome.current_beat.load(Ordering::Relaxed), 1);
+    assert_eq!(quiet_rx.metronome.current_beat.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn metronome_periods_are_sample_exact_without_fractional_bpm_drift() {
+    for bpm in [30_u16, 73, 120, 137, 300] {
+        let (mut rx, _) = channels(128);
+        rx.sync_metronome(click_config(bpm, 3), 0);
+        let mut synth = metronome::Metronome::new(Arc::clone(&rx.metronome));
+        synth.begin_block();
+        let end = (6 * 2_880_000_u64).div_ceil(u64::from(bpm));
+        let mut onsets = Vec::new();
+        let mut previous = 0.0;
+        for sample in 0..end {
+            let value = synth.next_sample();
+            if previous == 0.0 && value > 0.0 {
+                onsets.push(sample);
+            }
+            previous = value;
+        }
+        let expected: Vec<_> = (0..6_u64)
+            .map(|beat| (beat * 2_880_000).div_ceil(u64::from(bpm)) + 1)
+            .collect();
+        assert_eq!(onsets, expected, "BPM {bpm}");
+    }
+}
+
+#[test]
+fn metronome_accents_and_waveform_are_independent_of_callback_size() {
+    let render = |frames| {
+        let (mut rx, mut mixer) = channels(frames);
+        rx.sync_metronome(click_config(300, 3), 0);
+        let stats = Stats::default();
+        let mut result = vec![0.0_f32; 38_400];
+        for block in result.chunks_mut(frames) {
+            mixer.playback(block, 1, &stats);
+        }
+        assert_eq!(rx.metronome.current_beat.load(Ordering::Relaxed), 0);
+        result
+    };
+    let samples = render(64);
+    assert_eq!(samples, render(128));
+    assert_eq!(samples, render(256));
+    // 1200 Hz crosses zero after 20 samples, 800 Hz after 30 samples.
+    assert!(samples[21] < 0.0);
+    assert!(samples[9600 + 21] > 0.0);
+    assert!(samples[9600 + 31] < 0.0);
+    let peak = |start| {
+        samples[start..start + 960]
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max)
+    };
+    assert!(peak(0) > peak(9600));
+    assert_eq!(&samples[..960], &samples[28_800..29_760]);
+    assert_eq!(&samples[9600..10_560], &samples[19_200..20_160]);
+    assert!(samples[960..9600].iter().all(|&s| s == 0.0));
+    assert!(
+        samples
+            .windows(2)
+            .all(|pair| (pair[0] - pair[1]).abs() < 0.08)
+    );
+}
+
+#[test]
+fn metronome_bpm_phase_and_disable_changes_preserve_an_in_flight_click() {
+    for config in [
+        click_config(300, 2),
+        click_config(120, 4),
+        jam_protocol::MetronomeConfig::default(),
+    ] {
+        let (mut rx, mut mixer) = channels(128);
+        let (mut reference_rx, mut reference) = channels(128);
+        let stats = Stats::default();
+        rx.sync_metronome(click_config(120, 4), 0);
+        reference_rx.sync_metronome(click_config(120, 4), 0);
+        let mut prefix = [0.0_f32; 128];
+        mixer.playback(&mut prefix, 1, &stats);
+        reference.playback(&mut prefix, 1, &stats);
+        // Realign exactly onto a new downbeat in the middle of the old pulse.
+        rx.sync_metronome(config, 0);
+        let mut changed = [0.0_f32; 1024];
+        let mut unchanged = changed;
+        mixer.playback(&mut changed, 1, &stats);
+        reference.playback(&mut unchanged, 1, &stats);
+        assert_eq!(changed, unchanged);
+        assert!(changed[832..].iter().all(|&s| s == 0.0));
+    }
+}
+
+#[test]
+fn metronome_restarts_at_new_bpm_boundary_and_waits_for_future_anchor() {
+    let (mut rx, mut mixer) = channels(128);
+    let stats = Stats::default();
+    rx.sync_metronome(click_config(120, 4), -10_000); // Anchor in 480 samples.
+    let mut output = [0.0_f32; 1440];
+    mixer.playback(&mut output, 1, &stats);
+    assert!(output[..481].iter().all(|&s| s == 0.0));
+    assert!(output[481] > 0.0);
+    rx.sync_metronome(click_config(300, 3), 10_000);
+    let mut output = vec![0.0_f32; 19_000];
+    mixer.playback(&mut output, 1, &stats);
+    // 480 samples into the new beat: next starts after 9120 samples.
+    assert!(output[..9121].iter().all(|&s| s == 0.0));
+    assert!(output[9121] > 0.0);
+    assert!(output[18_721] > 0.0);
+    assert_eq!(rx.metronome.current_beat.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn metronome_is_local_and_mute_gain_are_smooth_and_do_not_stop_phase() {
+    let (mut rx, mut mixer) = channels(128);
+    let mut monitor = mixer.enable_local_monitor();
+    let (mut mic, mut net) = RingBuffer::new(256);
+    let stats = Stats::default();
+    rx.sync_metronome(click_config(300, 3), 0);
+    let mut output = [0.0_f32; 128];
+    crate::audio::capture(&[0.0; 128], 1, &mut mic, Some(&mut monitor), &stats);
+    mixer.playback(&mut output, 1, &stats);
+    assert!(output.iter().any(|&s| s != 0.0));
+    assert!((0..128).all(|_| net.pop() == Ok(0.0)));
+    assert_eq!(net.slots(), 0);
+    let last = output[127];
+    rx.metronome.mute.store(true, Ordering::Relaxed);
+    mixer.playback(&mut output, 1, &stats);
+    assert!((output[0] - last).abs() < 0.08);
+    assert!(output[48..].iter().all(|&s| s == 0.0));
+    for _ in 0..80 {
+        mixer.playback(&mut output, 1, &stats);
+        assert!(output.iter().all(|&s| s == 0.0));
+    }
+    assert_eq!(rx.metronome.current_beat.load(Ordering::Relaxed), 1);
+    for gain in [f32::NAN, f32::INFINITY, -1.0] {
+        rx.metronome.gain.store(gain.to_bits(), Ordering::Relaxed);
+        rx.metronome.mute.store(false, Ordering::Relaxed);
+        mixer.playback(&mut output, 1, &stats);
+        assert!(output.iter().all(|&s| s == 0.0));
+    }
+}
+
 #[test]
 fn remote_audio_and_local_monitor_fill_every_output_channel() {
     for output_channels in [1, 2, 4] {
