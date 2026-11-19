@@ -30,11 +30,12 @@ const JOIN_INTERVAL: Duration = Duration::from_millis(500);
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     pub target_chunks: usize,
     pub loss: f64,
     pub jitter_ms: u32,
+    pub delay_ms: u32,
 }
 
 impl Default for Settings {
@@ -43,6 +44,7 @@ impl Default for Settings {
             target_chunks: 3,
             loss: 0.0,
             jitter_ms: 0,
+            delay_ms: 0,
         }
     }
 }
@@ -89,14 +91,28 @@ pub struct Network {
 
 impl Network {
     pub fn connect(server: SocketAddr, nickname: &str) -> io::Result<Self> {
+        Self::connect_with_bind(server, nickname, None)
+    }
+
+    pub fn connect_with_bind(
+        server: SocketAddr,
+        nickname: &str,
+        bind_ip: Option<std::net::IpAddr>,
+    ) -> io::Result<Self> {
         if nickname.is_empty() || nickname.len() > NICKNAME_CAPACITY {
             return Err(io::Error::other("Nickname must contain 1..=32 UTF-8 bytes"));
         }
-        let socket = UdpSocket::bind(if server.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        })?;
+        let bind_addr = match bind_ip {
+            Some(ip) if ip.is_ipv4() == server.is_ipv4() => SocketAddr::new(ip, 0),
+            Some(_) => {
+                return Err(io::Error::other(
+                    "Bind IP address family must match server address",
+                ));
+            }
+            None if server.is_ipv4() => SocketAddr::from(([0, 0, 0, 0], 0)),
+            None => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)),
+        };
+        let socket = UdpSocket::bind(bind_addr)?;
         socket.connect(server)?; // Connected UDP filters datagrams from other endpoints.
         socket.set_nonblocking(true)?;
         let mut bytes = [0; NICKNAME_CAPACITY];
@@ -203,8 +219,8 @@ impl Network {
         if self.delayed.len() >= 512 {
             return;
         }
-        let delay =
-            Duration::from_secs_f64(self.random() * f64::from(self.settings.jitter_ms) / 1000.0);
+        let delay = Duration::from_millis(u64::from(self.settings.delay_ms))
+            + Duration::from_secs_f64(self.random() * f64::from(self.settings.jitter_ms) / 1000.0);
         self.delayed.push(Delayed {
             due: now + delay,
             peer: header.peer_id,
@@ -314,12 +330,14 @@ impl Network {
     fn pong(&mut self, stamp: u64, server_timestamp_us: u64, now: Instant) {
         if let Some((pending, sent)) = self.pending_ping {
             if pending == stamp {
-                let rtt = now.duration_since(sent).as_secs_f64() * 1000.0;
+                let simulated_rtt =
+                    Duration::from_millis(u64::from(self.settings.delay_ms).saturating_mul(2));
+                let elapsed = now.duration_since(sent).saturating_add(simulated_rtt);
+                let rtt = elapsed.as_secs_f64() * 1000.0;
                 self.rtt = Some((rtt, now));
                 self.rtt_max_ms = Some(self.rtt_max_ms.map_or(rtt, |peak| peak.max(rtt)));
                 self.pending_ping = None;
-                self.clock
-                    .observe(stamp, server_timestamp_us, now.duration_since(sent));
+                self.clock.observe(stamp, server_timestamp_us, elapsed);
             }
         }
     }

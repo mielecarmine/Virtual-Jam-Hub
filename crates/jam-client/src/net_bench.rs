@@ -24,16 +24,58 @@ use std::{
 };
 
 use codec::FRAME_SAMPLES;
-use network::{Network, Telemetry};
+use network::{Network, Settings, Telemetry};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-const USAGE: &str = "net_bench <SERVER_IP:PORT> [--peers N] [--seconds S] [--output report.txt]";
+const USAGE: &str = "net_bench <SERVER_IP:PORT> [--peers N] [--seconds S] [--output report.txt] \
+[--heterogeneous] [--jitter-chunks N] [--simulate-delay-ms MS] [--simulate-jitter-ms MS] [--simulate-loss P]";
+
+const PROFILES: [(&str, Settings); 4] = [
+    (
+        "fibra-lan",
+        Settings {
+            target_chunks: 3,
+            loss: 0.0,
+            jitter_ms: 1,
+            delay_ms: 2,
+        },
+    ),
+    (
+        "dsl-home",
+        Settings {
+            target_chunks: 3,
+            loss: 0.002,
+            jitter_ms: 4,
+            delay_ms: 10,
+        },
+    ),
+    (
+        "wifi-congested",
+        Settings {
+            target_chunks: 4,
+            loss: 0.015,
+            jitter_ms: 12,
+            delay_ms: 15,
+        },
+    ),
+    (
+        "mobile-4g",
+        Settings {
+            target_chunks: 6,
+            loss: 0.02,
+            jitter_ms: 16,
+            delay_ms: 22,
+        },
+    ),
+];
 
 struct Options {
     server: SocketAddr,
     peers: usize,
     seconds: u32,
     output: Option<PathBuf>,
+    network: Settings,
+    heterogeneous: bool,
 }
 
 impl Options {
@@ -48,8 +90,14 @@ impl Options {
             peers: 2,
             seconds: 10,
             output: None,
+            network: Settings::default(),
+            heterogeneous: false,
         };
         while let Some(flag) = args.next() {
+            if flag == "--heterogeneous" {
+                options.heterogeneous = true;
+                continue;
+            }
             let value = args
                 .next()
                 .ok_or_else(|| format!("Missing value for {flag}"))?;
@@ -57,6 +105,34 @@ impl Options {
                 "--peers" => options.peers = value.parse().map_err(|_| "Invalid peer count")?,
                 "--seconds" => options.seconds = value.parse().map_err(|_| "Invalid duration")?,
                 "--output" => options.output = Some(value.into()),
+                "--jitter-chunks" => {
+                    let chunks: usize = value.parse().map_err(|_| "Invalid jitter chunks")?;
+                    if !(1..=16).contains(&chunks) {
+                        return Err("--jitter-chunks must be 1..=16".into());
+                    }
+                    options.network.target_chunks = chunks;
+                }
+                "--simulate-loss" => {
+                    let loss: f64 = value.parse().map_err(|_| "Invalid simulated loss")?;
+                    if !loss.is_finite() || !(0.0..=1.0).contains(&loss) {
+                        return Err("--simulate-loss must be 0..=1".into());
+                    }
+                    options.network.loss = loss;
+                }
+                "--simulate-jitter-ms" => {
+                    let jitter: u32 = value.parse().map_err(|_| "Invalid simulated jitter")?;
+                    if jitter > 1000 {
+                        return Err("--simulate-jitter-ms must be 0..=1000".into());
+                    }
+                    options.network.jitter_ms = jitter;
+                }
+                "--simulate-delay-ms" => {
+                    let delay: u32 = value.parse().map_err(|_| "Invalid simulated delay")?;
+                    if delay > 1000 {
+                        return Err("--simulate-delay-ms must be 0..=1000".into());
+                    }
+                    options.network.delay_ms = delay;
+                }
                 _ => return Err(format!("Unknown option: {flag}")),
             }
         }
@@ -75,9 +151,19 @@ impl Options {
         }
         Ok(Some(options))
     }
+
+    fn peer_profile(&self, index: usize) -> (&'static str, Settings) {
+        if self.heterogeneous {
+            PROFILES[(index - 1) % PROFILES.len()]
+        } else {
+            ("uniform", self.network)
+        }
+    }
 }
 
 struct Peer {
+    profile: &'static str,
+    settings: Settings,
     network: Network,
     capture: Producer<f32>,
     mic: Consumer<f32>,
@@ -90,11 +176,18 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(server: SocketAddr, index: usize) -> io::Result<Self> {
+    fn new(
+        server: SocketAddr,
+        index: usize,
+        profile: &'static str,
+        settings: Settings,
+    ) -> io::Result<Self> {
         let (capture, mic) = RingBuffer::new(FRAME_SAMPLES);
         let (rx, mixer) = mixer::channels(FRAME_SAMPLES);
         Ok(Self {
-            network: Network::connect(server, &format!("bench-{index}"))?,
+            profile,
+            settings,
+            network: Network::connect(server, &format!("bench-{index}"))?.configure(settings),
             capture,
             mic,
             rx,
@@ -180,6 +273,18 @@ fn report(options: &Options, peers: &[Peer], elapsed: Duration, skipped: u64) ->
             peer.frames,
             peer.audible
         );
+        if options.heterogeneous || peer.settings != Settings::default() {
+            let _ = writeln!(
+                text,
+                "  Profile peer {}: {} (delay={}ms, jitter={}ms, loss={:.2}%, chunks={})",
+                index + 1,
+                peer.profile,
+                peer.settings.delay_ms,
+                peer.settings.jitter_ms,
+                peer.settings.loss * 100.0,
+                peer.settings.target_chunks
+            );
+        }
     }
     let samples: Vec<_> = peers.iter().flat_map(|p| p.samples.iter()).collect();
     let metrics = [
@@ -221,7 +326,10 @@ fn report(options: &Options, peers: &[Peer], elapsed: Duration, skipped: u64) ->
 
 fn run(options: &Options) -> io::Result<String> {
     let mut peers = (1..=options.peers)
-        .map(|index| Peer::new(options.server, index))
+        .map(|index| {
+            let (profile, settings) = options.peer_profile(index);
+            Peer::new(options.server, index, profile, settings)
+        })
         .collect::<io::Result<Vec<_>>>()?;
     // Start the measured interval only after every simulated peer has joined.
     while peers.iter().any(|p| !p.network.is_connected()) {

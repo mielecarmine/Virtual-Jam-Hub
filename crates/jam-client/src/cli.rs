@@ -1,11 +1,12 @@
 //! Backend and device selection, performed outside the audio callbacks.
 
-use std::{error::Error, io, time::Duration};
+use std::{error::Error, io, net::IpAddr, path::PathBuf, time::Duration};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
 const HELP: &str = "Usage: jam-client (no arguments opens the desktop setup screen)
        jam-client [--server IP:PORT] [--nickname NAME] [--host NAME] [--input NAME] [--output NAME] [--seconds N]
+       jam-client --server IP:PORT --synthetic [--buffer-frames 64|128|256] [--telemetry-dir DIR] [--bind-ip IP]
        jam-client [--host NAME] --list-devices
 Without --server: local loopback. With --server: UDP Opus audio (2.5 ms, 96 kbps), no local monitoring.
 Default: system backend/devices, 300 seconds. Host names are case-insensitive.
@@ -13,30 +14,43 @@ Use exact device names from --list-devices. No fallback if a requested device is
 Windows: --host asio selects the vendor ASIO driver; --host wasapi selects WASAPI.
 Linux: --host alsa; use a hardware device name for direct ALSA, default/pipewire for PipeWire.
 macOS: --host coreaudio.
-UDP: --jitter-chunks 3 (1..=16), --simulate-loss 0.02 (0..=1), --simulate-jitter-ms 10 (0..=1000).";
+UDP: --jitter-chunks 3 (1..=16), --simulate-loss 0.02 (0..=1), --simulate-jitter-ms 10 (0..=1000),
+     --simulate-delay-ms 15 (0..=1000), --bind-ip IP, --metronome-bpm 120 (30..=300).";
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     pub network: crate::network::Settings,
+    pub bind_ip: Option<IpAddr>,
     pub host: Option<String>,
     pub server: Option<std::net::SocketAddr>,
     pub nickname: String,
     pub input: Option<String>,
     pub output: Option<String>,
     pub duration: Duration,
+    pub buffer_frames: u32,
+    pub metronome_bpm: Option<u16>,
+    pub telemetry_dir: Option<PathBuf>,
+    pub synthetic: bool,
     pub list: bool,
 }
 
 impl Options {
+    #[allow(clippy::too_many_lines)]
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Self>, Box<dyn Error>> {
         let mut args = args.into_iter();
         let mut options = Self {
             network: crate::network::Settings::default(),
+            bind_ip: None,
             host: None,
             server: None,
             nickname: "musician".into(),
             input: None,
             output: None,
             duration: Duration::from_secs(300),
+            buffer_frames: 128,
+            metronome_bpm: None,
+            telemetry_dir: None,
+            synthetic: false,
             list: false,
         };
         while let Some(arg) = args.next() {
@@ -46,9 +60,15 @@ impl Options {
                     return Ok(None);
                 }
                 "--list-devices" => options.list = true,
+                "--synthetic" => options.synthetic = true,
                 "--jitter-chunks"
                 | "--simulate-loss"
                 | "--simulate-jitter-ms"
+                | "--simulate-delay-ms"
+                | "--bind-ip"
+                | "--buffer-frames"
+                | "--metronome-bpm"
+                | "--telemetry-dir"
                 | "--host"
                 | "--input"
                 | "--output"
@@ -81,6 +101,29 @@ impl Options {
                             }
                             options.network.jitter_ms = jitter;
                         }
+                        "--simulate-delay-ms" => {
+                            let delay = value.parse::<u32>()?;
+                            if delay > 1000 {
+                                return Err("--simulate-delay-ms must be 0..=1000".into());
+                            }
+                            options.network.delay_ms = delay;
+                        }
+                        "--bind-ip" => options.bind_ip = Some(value.parse()?),
+                        "--buffer-frames" => {
+                            let frames = value.parse::<u32>()?;
+                            if !crate::setup::BUFFER_SIZES.contains(&frames) {
+                                return Err("--buffer-frames must be 64, 128 or 256".into());
+                            }
+                            options.buffer_frames = frames;
+                        }
+                        "--metronome-bpm" => {
+                            let bpm = value.parse::<u16>()?;
+                            if !(30..=300).contains(&bpm) {
+                                return Err("--metronome-bpm must be 30..=300".into());
+                            }
+                            options.metronome_bpm = Some(bpm);
+                        }
+                        "--telemetry-dir" => options.telemetry_dir = Some(PathBuf::from(value)),
                         "--host" => options.host = Some(value),
                         "--server" => options.server = Some(value.parse()?),
                         "--nickname" => {
@@ -101,6 +144,14 @@ impl Options {
                     }
                 }
                 _ => return Err(format!("Unknown argument: {arg}\n{HELP}").into()),
+            }
+        }
+        if options.synthetic && options.server.is_none() && !options.list {
+            return Err("--synthetic requires --server IP:PORT".into());
+        }
+        if let (Some(ip), Some(server)) = (options.bind_ip, options.server) {
+            if ip.is_ipv4() != server.is_ipv4() {
+                return Err("--bind-ip address family must match --server".into());
             }
         }
         Ok(Some(options))
@@ -291,5 +342,49 @@ mod tests {
             assert!(Options::parse(args.into_iter().map(str::to_owned)).is_err());
         }
         assert!(host(Some("nonexistent-backend")).is_err());
+    }
+
+    #[test]
+    fn parses_synthetic_beta_tester_options_and_validates_constraints() {
+        let options = Options::parse(
+            [
+                "--server",
+                "127.0.0.1:7777",
+                "--synthetic",
+                "--buffer-frames",
+                "64",
+                "--simulate-delay-ms",
+                "15",
+                "--bind-ip",
+                "127.0.0.1",
+                "--metronome-bpm",
+                "120",
+                "--telemetry-dir",
+                "logs/beta",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(options.synthetic);
+        assert_eq!(options.buffer_frames, 64);
+        assert_eq!(options.network.delay_ms, 15);
+        assert_eq!(options.bind_ip, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(options.metronome_bpm, Some(120));
+        assert_eq!(options.telemetry_dir, Some(PathBuf::from("logs/beta")));
+
+        for invalid in [
+            vec!["--synthetic"],
+            vec!["--server", "127.0.0.1:7777", "--buffer-frames", "120"],
+            vec!["--server", "127.0.0.1:7777", "--simulate-delay-ms", "1001"],
+            vec!["--server", "127.0.0.1:7777", "--bind-ip", "::1"],
+            vec!["--server", "127.0.0.1:7777", "--metronome-bpm", "29"],
+            vec!["--server", "127.0.0.1:7777", "--metronome-bpm", "301"],
+        ] {
+            assert!(
+                Options::parse(invalid.into_iter().map(str::to_owned)).is_err(),
+                "expected error"
+            );
+        }
     }
 }

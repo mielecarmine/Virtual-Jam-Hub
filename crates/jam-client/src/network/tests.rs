@@ -726,6 +726,7 @@ fn simulated_loss_and_jitter_keep_playout_paced_and_bounded() {
             target_chunks: 3,
             loss: 0.02,
             jitter_ms: 10,
+            delay_ms: 0,
         });
     network.random = 12345;
     let (mut speaker, mut mixer) = crate::mixer::channels_with_capacity(4096);
@@ -1092,6 +1093,7 @@ fn telemetry_observes_simulated_loss_jitter_and_actual_buffer_occupancy() {
             loss: 0.02,
             jitter_ms: 10,
             target_chunks: 3,
+            delay_ms: 0,
         });
     network.random = 12345;
     let (mut rx, _mixer) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
@@ -1429,4 +1431,28 @@ fn mixer_stays_ready_through_five_to_fifteen_ms_worker_gaps() {
             }
         }
     }
+}
+
+#[test]
+fn connect_with_bind_validates_ip_family_and_simulated_delay_offsets_rtt_and_audio() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let endpoint = server.local_addr().unwrap();
+    assert!(Network::connect_with_bind(endpoint, "peer", Some("::1".parse().unwrap())).is_err());
+    let mut network =
+        Network::connect_with_bind(endpoint, "peer", Some("127.0.0.1".parse().unwrap()))
+            .unwrap()
+            .configure(Settings {
+                delay_ms: 15,
+                ..Settings::default()
+            });
+    assert_eq!(
+        network.socket.local_addr().unwrap().ip(),
+        "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+    );
+    let start = network.started;
+    network.incoming(&packet(2, 0.25), 1, start);
+    assert_eq!(network.delayed[0].due, start + Duration::from_millis(15));
+    network.pending_ping = Some((7, start));
+    network.pong(7, 1_000_000, start + Duration::from_millis(2));
+    assert_eq!(network.rtt, Some((32.0, start + Duration::from_millis(2))));
 }

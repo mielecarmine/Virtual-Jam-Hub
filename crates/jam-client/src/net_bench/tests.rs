@@ -61,11 +61,26 @@ fn validates_options_and_defaults() {
         "2",
         "--output",
         "report.txt",
+        "--heterogeneous",
+        "--jitter-chunks",
+        "4",
+        "--simulate-delay-ms",
+        "10",
+        "--simulate-jitter-ms",
+        "5",
+        "--simulate-loss",
+        "0.01",
     ])
     .unwrap()
     .unwrap();
     assert_eq!(options.peers, 3);
     assert_eq!(options.output, Some(PathBuf::from("report.txt")));
+    assert!(options.heterogeneous);
+    assert_eq!(options.network.target_chunks, 4);
+    assert_eq!(options.network.delay_ms, 10);
+    assert_eq!(options.network.jitter_ms, 5);
+    assert_eq!(options.peer_profile(1).0, "fibra-lan");
+    assert_eq!(options.peer_profile(3).0, "wifi-congested");
 }
 
 #[test]
@@ -76,6 +91,8 @@ fn localhost_three_peers_collect_telemetry_and_decode_opus() {
         peers: 3,
         seconds: 2,
         output: None,
+        network: Settings::default(),
+        heterogeneous: true,
     };
     let stop = AtomicBool::new(false);
     let text = thread::scope(|scope| {
