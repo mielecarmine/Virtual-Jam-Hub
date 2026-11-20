@@ -1,10 +1,10 @@
-# Deploy Servizio Ricevitore Centrale (`jam-collector`) — `185.198.245.40`
+# Central Log Collector Deployment (`jam-collector`) — `185.198.245.40`
 
-Servizio HTTP/1.1 leggero (zero dipendenze esterne) progettato per girare dietro reverse proxy HTTPS (Caddy o Nginx) su `185.198.245.40`.
+Lightweight HTTP/1.1 service (zero external dependencies) designed to run behind an HTTPS reverse proxy (Caddy or Nginx) on `185.198.245.40`.
 
-## Struttura directory su disco
+## On-Disk Directory Structure
 
-Tutti i file ricevuti vengono catalogati automaticamente per **data UTC** e **IP di provenienza** ricavati lato server (dalla connessione o dagli header fidati `X-Real-IP` / `X-Forwarded-For` quando il proxy è su loopback):
+All received files are automatically cataloged by **UTC date** and **source IP** determined server-side (from the socket connection or trusted `X-Real-IP` / `X-Forwarded-For` headers when the proxy is on loopback):
 
 ```text
 /var/log/jam-collector/
@@ -14,32 +14,32 @@ Tutti i file ricevuti vengono catalogati automaticamente per **data UTC** e **IP
         └── client-<timestamp_ms>-<peer_id>.json
 ```
 
-* Gli IP IPv6 vengono sanitizzati sostituendo `:` con `_`.
-* `session_id` e `peer_id` vengono filtrati rigorosamente a `[A-Za-z0-9_-]` (max 32 caratteri), eliminando qualsiasi rischio di *path traversal*.
+* IPv6 addresses are sanitized by replacing `:` with `_`.
+* `session_id` and `peer_id` are strictly filtered to `[A-Za-z0-9_-]` (max 32 characters), eliminating any *path traversal* risk.
 
-## Sicurezza & Anti-Abuse
+## Security & Anti-Abuse
 
-* **Payload cap rigido:** `<= 256 KiB` per report client (`POST /api/v1/logs/client`), `<= 2 MiB` per log server (`POST /api/v1/logs/server`). Richieste senza `Content-Length` o con `Transfer-Encoding: chunked` vengono rifiutate (`411`), quelle oltre soglia ricevono `413`.
-* **Rate limiting per IP:** default `30` richieste/minuto per IP sorgente (`429 Too Many Requests`).
-* **Token beta opzionale:** impostare `JAM_COLLECTOR_BETA_TOKEN` in `/etc/virtual-jam/collector.env` per richiedere `X-Jam-Beta-Key: <token>` oppure `Authorization: Bearer <token>` (`401 Unauthorized` se assente/errato).
-* **Retention e quota disco:** pulizia automatica delle directory `<YYYY-MM-DD>` più vecchie di `JAM_COLLECTOR_RETENTION_DAYS` (default `30` giorni) e taglio delle giornate più vecchie se si supera `JAM_COLLECTOR_MAX_DISK_MB` (default `2048` MiB).
+* **Strict payload cap:** `<= 256 KiB` for client reports (`POST /api/v1/logs/client`), `<= 2 MiB` for server logs (`POST /api/v1/logs/server`). Requests missing `Content-Length` or using `Transfer-Encoding: chunked` are rejected (`411`), and oversized payloads receive `413`.
+* **Per-IP rate limiting:** default `30` requests/minute per source IP (`429 Too Many Requests`).
+* **Optional beta token:** set `JAM_COLLECTOR_BETA_TOKEN` in `/etc/virtual-jam/collector.env` to require `X-Jam-Beta-Key: <token>` or `Authorization: Bearer <token>` (`401 Unauthorized` if missing or invalid).
+* **Retention and disk quota:** automatic cleanup of `<YYYY-MM-DD>` directories older than `JAM_COLLECTOR_RETENTION_DAYS` (default `30` days) and pruning of the oldest days when exceeding `JAM_COLLECTOR_MAX_DISK_MB` (default `2048` MiB).
 
-## Installazione su `185.198.245.40`
+## Installation on `185.198.245.40`
 
 ```sh
 cargo build --locked --release -p jam-collector
 sudo sh deploy/collector/install-collector.sh target/release/jam-collector
 ```
 
-Configurare opzionalmente il token beta in `/etc/virtual-jam/collector.env` e riavviare:
+Optionally configure the beta token in `/etc/virtual-jam/collector.env` and restart:
 
 ```sh
 sudo systemctl restart jam-collector.service
 ```
 
-Esporre il servizio in HTTPS tramite **Caddy** (`deploy/collector/Caddyfile`) o **Nginx** (`deploy/collector/nginx-jam-collector.conf`) e aprire `443/tcp` su UFW/firewall (`jam-collector` ascolta solo su `127.0.0.1:8080`).
+Expose the service over HTTPS via **Caddy** (`deploy/collector/Caddyfile`) or **Nginx** (`deploy/collector/nginx-jam-collector.conf`) and open `443/tcp` on UFW/firewall (`jam-collector` listens only on `127.0.0.1:8080`).
 
-## Verifica rapida
+## Quick Verification
 
 ```sh
 curl -fsS https://185.198.245.40/healthz

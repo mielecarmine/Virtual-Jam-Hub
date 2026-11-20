@@ -1,66 +1,66 @@
-# Contribuire a Virtual Jam
+# Contributing to Virtual Jam
 
-Grazie per l'interesse nel contribuire a **Virtual Jam**! Questo documento descrive
-le linee guida tecniche, i vincoli real-time inviolabili e il flusso di lavoro per
-proporre modifiche tramite Pull Request.
-
----
-
-## 1. Struttura del Monorepo (Cargo Workspace)
-
-Il progetto è un workspace Rust (`edition = "2024"`, MSRV `1.85`) composto da quattro crate:
-
-- `crates/jam-protocol`: libreria condivisa con costanti, header/messaggi binari `#[repr(C)]` e serializzazione zero-copy. **Nessuna dipendenza da OS, audio o rete.**
-- `crates/jam-server`: demone SFU UDP headless (`1 -> N-1` packet reflector, `SessionTable` con watchdog 5 s, signaling P2P e sincronizzazione clock/metronomo).
-- `crates/jam-client`: client desktop (motore audio `cpal` + `rtrb`, jitter buffer adattivo per singolo peer, codec `opus`, mixer DSP, motore P2P ibrido e GUI `eframe`/`egui`).
-- `crates/jam-collector`: servizio HTTP opzionale per la raccolta centralizzata di log operativi e report anonimi di beta-testing.
+Thank you for your interest in contributing to **Virtual Jam**! This document outlines
+the technical guidelines, non-negotiable real-time constraints, and workflow for
+submitting changes via Pull Requests.
 
 ---
 
-## 2. Vincoli Architetturali e Real-Time (Non Negoziabili)
+## 1. Monorepo Structure (Cargo Workspace)
 
-Ogni contributo deve rispettare rigorosamente le seguenti regole per preservare la latenza end-to-end sotto i 20–25 ms e l'assenza di glitch audio:
+The project is a Rust workspace (`edition = "2024"`, MSRV `1.85`) composed of four crates:
 
-1. **Audio Thread Real-Time (`cpal` callbacks):**
-   - **VIETATO** allocare memoria sull'heap (`Box`, `Vec`, `String`, `format!`, `.to_owned()`).
-   - **VIETATO** acquisire `Mutex`, `RwLock`, canali MPSC standard o eseguire syscall / I/O bloccanti (rete, disco, logging, sleep).
-   - La comunicazione tra Audio Thread, Network Thread e UI Thread deve avvenire **esclusivamente** tramite ring buffer lock-free SPSC (`rtrb`) e atomici (`AtomicU32` con `f32::to_bits()`, `AtomicBool`, `AtomicU64`).
-2. **Networking & Protocollo:**
-   - **Solo UDP** per streaming audio e controllo real-time (mai TCP, per evitare *Head-of-Line Blocking*).
-   - Nessun formato testuale (JSON, MessagePack, ecc.) sul wire audio/controllo: usare layout binari fissi con endianness esplicita (`to_le_bytes` / `from_le_bytes`) e datagrammi sempre `< 1400` byte (sotto MTU).
-   - Ogni modifica a `jam-protocol` deve includere **unit test di serializzazione round-trip** e validazione dei casi limite.
-3. **Isolamento per Peer:**
-   - Jitter buffer (`PeerJitterBuffer`) e decoder Opus devono essere istanziati **indipendentemente per ogni `peer_id`**, mai condivisi tra peer diversi.
-4. **Qualità Rust & Sicurezza:**
-   - Evitare `unsafe`; se strettamente necessario, documentare ogni blocco con un commento `// SAFETY:` esaustivo.
-   - Evitare `unwrap()` / `expect()` nel codice di libreria e nei percorsi runtime non-test; propagare gli errori in modo esplicito (`Result` / `?`).
-   - Rispettare i lint del workspace (`clippy::all` e `clippy::pedantic` come errori in CI).
+- `crates/jam-protocol`: shared library containing constants, `#[repr(C)]` binary headers/messages, and zero-copy serialization. **No OS, audio, or networking dependencies.**
+- `crates/jam-server`: headless UDP SFU daemon (`1 -> N-1` packet reflector, `SessionTable` with 5 s watchdog, P2P signaling, and room clock/metronome synchronization).
+- `crates/jam-client`: desktop client (`cpal` + `rtrb` audio engine, per-peer adaptive jitter buffer, `opus` codec, DSP mixer, hybrid P2P engine, and `eframe`/`egui` GUI).
+- `crates/jam-collector`: optional HTTP service for centralized collection of operational logs and anonymous beta-testing reports.
 
 ---
 
-## 3. Prerequisiti di Compilazione
+## 2. Architectural & Real-Time Constraints (Non-Negotiable)
 
-- **Toolchain Rust:** `rustc >= 1.85` (con `rustfmt` e `clippy`).
-- **Opus (`opusic-sys`):** CMake e un compilatore C/C++.
+Every contribution must strictly respect the following rules to keep end-to-end latency below 20–25 ms and prevent audio glitches:
+
+1. **Real-Time Audio Thread (`cpal` callbacks):**
+   - **FORBIDDEN** to allocate heap memory (`Box`, `Vec`, `String`, `format!`, `.to_owned()`).
+   - **FORBIDDEN** to acquire `Mutex`, `RwLock`, standard MPSC channels, or perform blocking syscalls / I/O (network, disk, logging, sleep).
+   - Communication between the Audio Thread, Network Thread, and UI Thread must occur **exclusively** through lock-free SPSC ring buffers (`rtrb`) and atomics (`AtomicU32` with `f32::to_bits()`, `AtomicBool`, `AtomicU64`).
+2. **Networking & Protocol:**
+   - **UDP only** for real-time audio streaming and control (never TCP, to avoid *Head-of-Line Blocking*).
+   - No text-based formats (JSON, MessagePack, etc.) on the audio/control wire: use fixed binary layouts with explicit endianness (`to_le_bytes` / `from_le_bytes`) and datagrams always `< 1400` bytes (below MTU).
+   - Every change to `jam-protocol` must include **round-trip serialization unit tests** and boundary/malformed input validation.
+3. **Per-Peer Isolation:**
+   - Jitter buffers (`PeerJitterBuffer`) and Opus decoders must be instantiated **independently for each `peer_id`**, never shared across different peers.
+4. **Rust Quality & Safety:**
+   - Avoid `unsafe`; if strictly necessary, document every block with a thorough `// SAFETY:` comment.
+   - Avoid `unwrap()` / `expect()` in library code and non-test runtime paths; propagate errors explicitly (`Result` / `?`).
+   - Comply with workspace lints (`clippy::all` and `clippy::pedantic` enforced as errors in CI).
+
+---
+
+## 3. Build Prerequisites
+
+- **Rust Toolchain:** `rustc >= 1.85` (with `rustfmt` and `clippy`).
+- **Opus (`opusic-sys`):** CMake and a C/C++ compiler.
 - **Linux:** `pkg-config`, `libasound2-dev`, `libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`, `libxcursor-dev`, `libxi-dev`, `libxrandr-dev`, `libgl1-mesa-dev`.
-- **Windows:** strumenti C++ MSVC, LLVM/`libclang` e Steinberg ASIO SDK (`CPAL_ASIO_DIR`, `LIBCLANG_PATH`) per la build con backend ASIO.
+- **Windows:** MSVC C++ build tools, LLVM/`libclang`, and Steinberg ASIO SDK (`CPAL_ASIO_DIR`, `LIBCLANG_PATH`) for builds with the ASIO backend.
 - **macOS:** Xcode Command Line Tools (CoreAudio).
 
 ---
 
-## 4. Flusso di Lavoro e Pull Request
+## 4. Workflow and Pull Requests
 
-1. **Apri o verifica una Issue:** prima di modifiche architetturali o nuove feature, apri una issue per discutere l'approccio.
-2. **Crea un branch dedicato** a partire dal branch `develop` (o dal branch di pre-release attivo):
+1. **Open or check an Issue:** before architectural changes or new features, open an issue to discuss the approach.
+2. **Create a dedicated branch** from `develop` (or the active pre-release branch):
    ```bash
    git checkout develop
    git pull origin develop
-   git checkout -b feat/breve-descrizione
+   git checkout -b feat/short-description
    ```
-3. **Implementa e aggiungi i test:**
-   - Aggiungi unit test deterministici (e test di zero-allocazione se tocchi percorsi audio).
-   - Se modifichi il protocollo wire o il comportamento utente, aggiorna `README.md`.
-4. **Esegui tutti i gate di verifica locali prima della PR:**
+3. **Implement and add tests:**
+   - Add deterministic unit tests (and zero-allocation tests if touching audio paths).
+   - Update `README.md` if you change the wire protocol or user-facing behavior.
+4. **Run all local verification gates before opening a PR:**
    ```bash
    cargo fmt --check
    cargo clippy --workspace -- -D warnings
@@ -68,16 +68,16 @@ Ogni contributo deve rispettare rigorosamente le seguenti regole per preservare 
    cargo clippy --workspace --features jam-client/telemetry-log -- -D warnings
    cargo test --workspace --features jam-client/telemetry-log
    ```
-   Se disponi di `cargo-deny`, verifica anche la conformità delle licenze delle dipendenze:
+   If you have `cargo-deny` installed, also verify third-party license compliance:
    ```bash
    cargo deny check licenses
    ```
-5. **Apri la Pull Request:** descrivi chiaramente contesto, modifiche, test eseguiti ed eventuali verifiche hardware manuali richieste (es. ASIO/CoreAudio/ALSA).
+5. **Open the Pull Request:** clearly describe context, changes, tests executed, and any required manual hardware verification (e.g., ASIO/CoreAudio/ALSA).
 
 ---
 
-## 5. Licenza dei Contributi
+## 5. Contribution License
 
-Virtual Jam è distribuito sotto licenza **GNU General Public License v3.0 o successiva (`GPL-3.0-or-later`)**, con l'eccezione aggiuntiva ai sensi della Sezione 7 della GPLv3 per il linking con lo Steinberg ASIO SDK sulle build Windows (vedi sezione **License** in [README.md](README.md)).
+Virtual Jam is distributed under the **GNU General Public License v3.0 or later (`GPL-3.0-or-later`)**, with an additional permission under GPLv3 Section 7 for linking with the Steinberg ASIO SDK on Windows builds (see the **License** section in [README.md](README.md)).
 
-Inviando una Pull Request, accetti che il tuo contributo sia distribuito secondo i medesimi termini di licenza del progetto.
+By submitting a Pull Request, you agree that your contribution will be licensed under the same terms as the project.

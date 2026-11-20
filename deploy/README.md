@@ -1,12 +1,12 @@
-# Deploy Linux — JAM-7
+# Linux Deployment — JAM-7
 
-Il server ascolta su UDP `0.0.0.0:7777`. Il protocollo attuale non offre
-autenticazione della stanza o cifratura: l'endpoint pubblico è per prove di sviluppo.
+The server listens on UDP `0.0.0.0:7777`. The current protocol does not provide
+room authentication or encryption: the public endpoint is intended for development testing.
 
-## Installazione
+## Installation
 
-Su Ubuntu/Debian con systemd e UFW, compilare con Rust >= 1.85 sulla macchina
-target (oppure con una toolchain compatibile con architettura e glibc del target):
+On Ubuntu/Debian with systemd and UFW, build with Rust >= 1.85 on the target
+machine (or with a toolchain matching the target's architecture and glibc):
 
 ```sh
 cargo build --locked --release -p jam-server
@@ -14,18 +14,18 @@ sudo apt-get install ufw
 sudo sh deploy/install.sh target/release/jam-server
 ```
 
-L'installer crea `jamserver` senza home e con shell `/bin/false`, installa un
-eseguibile di proprietà root, abilita l'avvio al boot e riavvia il servizio.
-È rieseguibile per aggiornare il binario. I limiti sono 128 MiB di memoria,
-16 task e 1.024 file aperti; non si impone una quota CPU al percorso UDP.
-`Restart=always` e `RestartSec=2` coprono crash e uscite del processo.
-Un arresto esplicito con `systemctl stop` resta intenzionalmente fermo.
+The installer creates a `jamserver` user without a home directory and with `/bin/false`
+as its shell, installs a root-owned binary, enables startup at boot, and restarts the
+service. It can be re-run to upgrade the binary. Limits are 128 MiB of memory, 16 tasks,
+and 1,024 open files; no CPU quota is imposed on the UDP path.
+`Restart=always` and `RestartSec=2` handle crashes and process exits.
+An explicit stop with `systemctl stop` intentionally keeps the service stopped.
 
-L'installer aggiunge `ufw allow 7777/udp` ma non abilita UFW su host esistenti:
-controllare `sudo ufw status` e predisporre prima l'accesso amministrativo.
-Aprire anche UDP 7777 nel security group cloud. Il traffico applicativo non
-richiede porte TCP. Per una nuova VM gestita via SSM si può abilitare UFW con
-default deny incoming e allow outgoing, senza ingressi SSH.
+The installer adds `ufw allow 7777/udp` but does not enable UFW on existing hosts:
+check `sudo ufw status` and ensure administrative access is configured first.
+Also open UDP 7777 in the cloud security group. Application traffic requires no
+TCP ports. On a fresh VM managed via SSM, UFW can be enabled with default deny
+incoming and allow outgoing, without SSH ingress rules.
 
 ```sh
 sudo systemctl status jam-server --no-pager
@@ -34,21 +34,21 @@ sudo systemctl show jam-server -p User -p Restart -p RestartUSec -p MemoryMax
 sudo ss -lunp 'sport = :7777'
 ```
 
-## Verifica da rete domestica
+## Verification from a Home Network
 
-Dal checkout locale, sostituire `IP_PUBBLICO` con l'indirizzo della VM:
+From a local checkout, replace `PUBLIC_IP` with the VM's address:
 
 ```sh
-cargo run --locked -p jam-server --example probe -- IP_PUBBLICO:7777
+cargo run --locked -p jam-server --example probe -- PUBLIC_IP:7777
 ```
 
-Il probe attende `JoinAccepted` con sample rate corretto, invia un `Ping`,
-verifica il timestamp del `Pong` e invia `Leave`. Ritenta ogni 500 ms per
-circa 3 secondi e termina con errore se il server non risponde. Consuma uno
-slot della stanza per la durata della verifica; con 8 peer presenti non può entrare.
-La verifica su loopback non prova l'apertura del firewall cloud.
+The probe waits for `JoinAccepted` with the expected sample rate, sends a `Ping`,
+verifies the `Pong` timestamp, and sends `Leave`. It retries every 500 ms for
+about 3 seconds and exits with an error if the server does not respond. It occupies
+one room slot for the duration of the check; if 8 peers are already connected, it
+cannot join. Testing over loopback does not verify cloud firewall rules.
 
-Per controllare la resilienza su una VM di sviluppo senza musicisti connessi:
+To test crash resilience on a development VM with no musicians connected:
 
 ```sh
 sudo systemctl kill --signal=SIGKILL --kill-whom=main jam-server
@@ -57,20 +57,20 @@ sudo systemctl is-active jam-server
 sudo systemctl is-enabled jam-server
 ```
 
-Dopo un reboot ripetere stato e probe dall'esterno.
+After a reboot, re-check the service status and run the external probe again.
 
-## Risorse AWS
+## AWS Resources
 
-Region: `eu-north-1`. Accesso amministrativo tramite Systems Manager;
-il ruolo `virtual-jam-server-ssm` assume identità EC2 con la sola policy
-`AmazonSSMManagedInstanceCore`. Nessuna credenziale statica nel servizio.
-IMDSv2 obbligatorio e disco gp3 cifrato. Non sono necessari NAT Gateway,
-load balancer o IP elastici per questa verifica.
+Region: `eu-north-1`. Administrative access via Systems Manager; the
+`virtual-jam-server-ssm` role assumes EC2 identity with only the
+`AmazonSSMManagedInstanceCore` policy. No static credentials are stored on the
+service. IMDSv2 is enforced and the gp3 volume is encrypted. No NAT Gateway,
+load balancer, or Elastic IP is needed for this verification.
 
-L'IP pubblico assegnato automaticamente può cambiare dopo stop/start.
-VM, disco, IPv4 pubblico e traffico possono consumare crediti o generare costi:
-controllare AWS Settings > Billing. Arrestare la VM riduce il consumo compute,
-ma conserva il disco. Per rimuovere tutto dopo le prove: terminare l'istanza
-(il volume root è DeleteOnTermination), eliminare il security group dedicato,
-rimuovere il ruolo dall'instance profile, eliminare il profilo, staccare
-`AmazonSSMManagedInstanceCore` e infine eliminare il ruolo dedicato.
+The auto-assigned public IP may change after stop/start.
+The VM, disk, public IPv4, and network traffic may consume credits or incur costs:
+check AWS Settings > Billing. Stopping the VM reduces compute usage while keeping
+the disk. To clean up everything after testing: terminate the instance (the root
+volume has `DeleteOnTermination`), delete the dedicated security group, remove the
+role from the instance profile, delete the instance profile, detach
+`AmazonSSMManagedInstanceCore`, and finally delete the dedicated role.
