@@ -206,6 +206,7 @@ impl AppState {
             {
                 self.refresh();
             }
+            telemetry_opt_in(ui, &mut self.preferences.share_telemetry);
         });
         if previous != self.preferences {
             self.saved = false;
@@ -390,6 +391,18 @@ impl AppState {
             self.disconnecting = self.command(Command::Disconnect);
         }
     }
+}
+
+fn telemetry_opt_in(ui: &mut egui::Ui, share_telemetry: &mut bool) {
+    ui.add_space(12.0);
+    ui.checkbox(
+        share_telemetry,
+        "Condividi report tecnico anonimo di fine sessione (beta)",
+    );
+    ui.small(
+        "Opt-in: invia solo versione, OS, backend audio, buffer e statistiche RTT/jitter/loss \
+         al server beta (185.198.245.40) alla disconnessione. Nessun audio o dato personale.",
+    );
 }
 
 fn meter_label(beats: u8) -> String {

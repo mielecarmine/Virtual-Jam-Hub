@@ -982,3 +982,44 @@ notifica della maschera, frame P2P unico, filtro della copia SFU e ripresa del r
 nel tick a 650 ms senza nuova sessione. Test deterministici coprono soglia esatta
 600/601 ms, retry, endpoint LAN, riuso ID, guard da 2 a 8 musicisti e budget/fase
 Tempo Leader con RTT diretto.
+
+### Raccolta automatica log e report di fine sessione — JAM-39
+
+L'invio remoto di log operativi (`jam-server`) e report di fine sessione (`jam-client`)
+è **disabilitato per default** (opt-in esplicito nel rispetto delle policy FOSS/GDPR).
+Nessun flusso audio, nickname o dato personale viene trasmesso.
+
+#### Dati raccolti (solo previo consenso esplicito)
+- **`jam-server`**: versione server, OS, durata sessione, conteggi aggregati di
+  join/leave/timeout watchdog (5 s), pacchetti inoltrati/scartati/bypassati P2P,
+  aggiornamenti `direct_peers_mask` ed errori di socket. L'invio avviene su un thread
+  dedicato (`jam-server-telemetry`) alimentato da un canale bounded non bloccante:
+  il loop UDP real-time non attende mai I/O di rete o disco e continua normalmente
+  anche se il collettore non è raggiungibile.
+- **`jam-client`**: report JSON compatto inviato in modo asincrono alla disconnessione
+  (fuori dai callback audio `cpal`), contenente versione client, OS/architettura,
+  backend audio (`ASIO`/`WASAPI`/`ALSA`/`CoreAudio`), sample rate, buffer size,
+  modalità di connessione (`p2p`/`sfu`/`hybrid`/`none`), durata, RTT medio/p95/max,
+  jitter medio/max, packet loss %, overflow/underflow audio, scarti jitter buffer e
+  attivazioni PLC Opus.
+
+#### Come abilitare o disabilitare
+- **GUI desktop (`jam-client`)**: attivare o disattivare la casella
+  *«Condividi report tecnico anonimo di fine sessione (beta)»* nella schermata iniziale
+  (salvata in `client.toml` come `share_telemetry = false|true`). Endpoint e token
+  opzionale sono personalizzabili tramite `telemetry_endpoint` / `telemetry_token` in
+  `client.toml` o variabili `JAM_TELEMETRY_ENDPOINT` / `JAM_TELEMETRY_TOKEN`.
+- **CLI (`jam-client`)**: passare `--share-logs` (oppure `JAM_SHARE_LOGS=1`) per inviare
+  all'endpoint beta preconfigurato (`https://185.198.245.40/api/v1/logs/client`), oppure
+  `--telemetry-endpoint <URL>` e opzionalmente `--telemetry-token <TOKEN>`.
+- **Server (`jam-server`)**: passare `--share-logs` (oppure `JAM_SHARE_LOGS=1`) per
+  inviare a `https://185.198.245.40/api/v1/logs/server`, oppure `--telemetry-endpoint <URL>`,
+  `--telemetry-token <TOKEN>` e `--telemetry-interval-secs <N>` (default `60`).
+
+#### Servizio ricevitore centrale (`jam-collector`)
+Il crate `crates/jam-collector` implementa il ricevitore HTTP/1.1 da esporre dietro
+reverse proxy HTTPS (Caddy o Nginx) su `185.198.245.40`, con catalogazione deterministica
+`<YYYY-MM-DD>/<source_ip>/`, sanitizzazione anti *path traversal*, rate limiting per IP,
+limiti rigidi di payload (`<= 256 KiB` client, `<= 2 MiB` server), token beta opzionale
+e retention/quota disco automatica. Per l'installazione e la configurazione HTTPS seguire
+[deploy/collector/README.md](deploy/collector/README.md).

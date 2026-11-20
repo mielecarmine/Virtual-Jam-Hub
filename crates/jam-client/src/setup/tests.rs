@@ -40,6 +40,7 @@ fn preferences_survive_restart_and_replace_existing_file() {
         input: Some("USB \"input\"".into()),
         output: Some("USB output".into()),
         buffer_frames: 64,
+        ..Preferences::default()
     };
     preferences.save(&path).unwrap();
     assert_eq!(Preferences::load(&path).unwrap(), preferences);
@@ -51,6 +52,20 @@ fn preferences_survive_restart_and_replace_existing_file() {
         1
     );
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn telemetry_sharing_is_opt_in_by_default() {
+    let mut preferences = Preferences::default();
+    assert!(!preferences.share_telemetry);
+    assert!(preferences.report_target().is_none());
+
+    preferences.share_telemetry = true;
+    preferences.telemetry_endpoint = Some("https://185.198.245.40/api/v1/logs/client".into());
+    preferences.telemetry_token = Some("beta-key".into());
+    let target = preferences.report_target().expect("opted in");
+    assert_eq!(target.endpoint, "https://185.198.245.40/api/v1/logs/client");
+    assert_eq!(target.beta_token.as_deref(), Some("beta-key"));
 }
 
 #[test]
