@@ -15,8 +15,9 @@ const RECOVERY_THRESHOLD: u8 = 8;
 // Never rewind more than one second of audio (400 x 2.5 ms).
 const MAX_RECOVERY_LAG: u32 = 400;
 const STABLE_WINDOW: Duration = Duration::from_secs(1);
-// Allow three queued chunks beyond the nominal network jitter target.
-const QUEUE_SLACK: usize = 3;
+// Recover one step every 250 ms without late packets; explicit CLI targets remain floors.
+const DECAY_WINDOW: Duration = Duration::from_millis(250);
+const QUEUE_SLACK: usize = 1;
 
 /// Cumulative worker counters; `late_dropped` includes `late_dropped_far` (>= WINDOW).
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,7 +64,6 @@ pub struct PeerJitterBuffer {
 }
 
 impl PeerJitterBuffer {
-    #[cfg(test)]
     pub(crate) fn target_chunks(&self) -> usize {
         self.target
     }
@@ -176,7 +176,7 @@ impl PeerJitterBuffer {
             return Ok(());
         }
         *slot = Some((sequence, *chunk));
-        if now.duration_since(self.stable_since) >= STABLE_WINDOW {
+        if now.duration_since(self.stable_since) >= DECAY_WINDOW {
             self.stable_since = now;
             self.late_count = 0;
             if self.target > self.nominal_target {

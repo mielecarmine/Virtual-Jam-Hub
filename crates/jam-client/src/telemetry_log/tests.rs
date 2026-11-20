@@ -36,9 +36,9 @@ fn latency_columns_and_summary_preserve_components_and_missing_rtt() {
         ("audio_io_ms", "5.000", "5.000"),
         ("codec_ms", "5.000", "5.000"),
         ("network_one_way_ms", "12.000", "N/A"),
-        ("rx_buffer_ms", "25.000", "25.000"),
-        ("total_one_way_ms", "47.000", "N/A"),
-        ("headroom_ms", "-22.000", "N/A"),
+        ("rx_buffer_ms", "12.500", "12.500"),
+        ("total_one_way_ms", "34.500", "N/A"),
+        ("headroom_ms", "-9.500", "N/A"),
         ("latency_class", "2.000", "N/A"),
     ] {
         let index = names.iter().position(|column| *column == name).unwrap();

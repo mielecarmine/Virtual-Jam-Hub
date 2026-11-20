@@ -14,8 +14,20 @@ mod metronome;
 use metronome::Metronome;
 pub use metronome::MetronomeControls;
 
-// 15 ms scheduling reserve plus one production interval (2.5 ms) at 48 kHz.
-pub(crate) const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 7;
+// Mono samples at 48 kHz, independent of the output channel count: 5 ms.
+pub(crate) const RX_TARGET_SAMPLES: usize = FRAME_SAMPLES * 2;
+
+pub(crate) fn rx_target_samples(callback_frames: usize) -> usize {
+    if callback_frames >= 128 {
+        RX_TARGET_SAMPLES.max(
+            callback_frames
+                .saturating_mul(2)
+                .saturating_add(FRAME_SAMPLES),
+        )
+    } else {
+        RX_TARGET_SAMPLES
+    }
+}
 
 // 1 ms at 48 kHz; tolerate one Opus interval before rebuilding the reserve.
 const FADE_SAMPLES: u16 = 48;
@@ -57,7 +69,7 @@ impl Continuity {
 }
 
 fn queue_capacity(frames: usize) -> usize {
-    (frames + RX_TARGET_SAMPLES).div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES + FRAME_SAMPLES
+    (frames + rx_target_samples(frames)).div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES
 }
 
 pub struct Controls {
@@ -89,6 +101,8 @@ pub struct QueuedSample {
 }
 
 pub struct RxChannels {
+    pub(crate) capture_frames: usize,
+    pub(crate) output_frames: Arc<AtomicU32>,
     pub rings: [Producer<QueuedSample>; MAX_PEERS],
     pub controls: Arc<[Controls; MAX_PEERS]>,
     pub local_control: Arc<Controls>,
@@ -96,6 +110,7 @@ pub struct RxChannels {
 }
 
 pub struct Mixer {
+    output_frames: Arc<AtomicU32>,
     pub(crate) rings: [Consumer<QueuedSample>; MAX_PEERS],
     pub controls: Arc<[Controls; MAX_PEERS]>,
     local_control: Arc<Controls>,
@@ -107,17 +122,24 @@ pub struct Mixer {
 }
 
 pub fn channels(frames: usize) -> (RxChannels, Mixer) {
-    channels_with_capacity(queue_capacity(frames))
+    let (mut rx, mixer) = channels_with_capacity(queue_capacity(frames));
+    rx.capture_frames = frames;
+    rx.output_frames
+        .store(u32::try_from(frames).unwrap_or(u32::MAX), Ordering::Relaxed);
+    (rx, mixer)
 }
 
 pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
     let controls = Arc::new(std::array::from_fn(|_| Controls::default()));
     let local_control = Arc::new(Controls::default());
     let metronome = Arc::new(MetronomeControls::default());
+    let output_frames = Arc::new(AtomicU32::new(0));
     let pairs = std::array::from_fn::<_, MAX_PEERS, _>(|_| RingBuffer::new(capacity));
     let (producers, consumers): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
     let rings = producers.try_into().unwrap_or_else(|_| unreachable!());
     let rx = RxChannels {
+        capture_frames: 0,
+        output_frames: Arc::clone(&output_frames),
         rings,
         controls: Arc::clone(&controls),
         local_control: Arc::clone(&local_control),
@@ -127,6 +149,7 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
     (
         rx,
         Mixer {
+            output_frames,
             rings,
             controls,
             local_control,
@@ -194,9 +217,9 @@ impl Mixer {
     fn align(&mut self, frames: usize, stats: &Stats) {
         // Only the consumer discards audio. Snapshot each queue so work stays bounded.
         // Keep the callback's demand AND the reserve, rather than consuming the reserve.
-        let prefill = frames.saturating_add(RX_TARGET_SAMPLES);
+        let prefill = frames.saturating_add(rx_target_samples(frames));
         // Chunk quantization must never discard the tail that completed startup.
-        let target = prefill.div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES + FRAME_SAMPLES;
+        let target = prefill.div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES;
         for (index, ring) in self.rings.iter_mut().enumerate() {
             let epoch = self.controls[index].epoch.load(Ordering::Relaxed);
             if self.epochs[index] != epoch {
@@ -267,6 +290,10 @@ impl Mixer {
             return;
         }
         stats.last_output_frames.store(
+            u32::try_from(data.len() / channels).unwrap_or(u32::MAX),
+            Ordering::Relaxed,
+        );
+        self.output_frames.store(
             u32::try_from(data.len() / channels).unwrap_or(u32::MAX),
             Ordering::Relaxed,
         );
