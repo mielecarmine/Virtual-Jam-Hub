@@ -402,7 +402,7 @@ fn send_control(socket: &UdpSocket, destination: SocketAddr, message: &ControlMe
 
 // UDP send completion does not guarantee receive readiness, even on loopback.
 // Keep the simulated tick timestamp deterministic while waiting for the OS.
-fn wait_for_datagram(socket: &UdpSocket) {
+pub(super) fn wait_for_datagram(socket: &UdpSocket) {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match socket.peek(&mut [0; 65_535]) {

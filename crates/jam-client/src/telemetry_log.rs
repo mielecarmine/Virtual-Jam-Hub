@@ -9,7 +9,7 @@ use std::{
 
 use crate::{network::Telemetry, setup::Preferences};
 
-const NAMES: [&str; 27] = [
+const NAMES: [&str; 29] = [
     "remote_peers",
     "rtt_ms",
     "jitter_ms",
@@ -37,6 +37,8 @@ const NAMES: [&str; 27] = [
     "total_one_way_ms",
     "headroom_ms",
     "latency_class",
+    "direct_peers_mask",
+    "route_rtt_ms",
 ];
 
 /// Actual CPAL stream configuration and the latest observed callback size.
@@ -140,7 +142,7 @@ impl SessionLog {
         )?;
         writeln!(
             self.writer,
-            "latency=estimated one-way, not measured peer-to-peer audio; audio_io_ms=requested capture + observed output (requested fallback) at 48000 Hz; codec_ms=Opus frame + encoder lookahead; network_one_way_ms=server RTT/2; rx_buffer_ms=max encoded peer queue + mixer SPSC reserve; total_one_way_ms=sum of components; headroom_ms=25-total (negative=over budget); latency_class=0 optimal (<20), 1 limit (20..=25), 2 tempo-drag (>25); missing RTT: network/total/headroom/class=N/A (excluded from summary)"
+            "latency=estimated one-way, not measured peer-to-peer audio; audio_io_ms=requested capture + observed output (requested fallback) at 48000 Hz; codec_ms=Opus frame + encoder lookahead; network_one_way_ms=slowest active route RTT/2 (P2P probe or SFU proxy); direct_peers_mask=bit peer_id-1 (1=P2P, 0=SFU); route_rtt_ms=slowest active audio route RTT; rx_buffer_ms=max encoded peer queue + mixer SPSC reserve; total_one_way_ms=sum of components; headroom_ms=25-total (negative=over budget); latency_class=0 optimal (<20), 1 limit (20..=25), 2 tempo-drag (>25); missing RTT: network/total/headroom/class=N/A (excluded from summary)"
         )?;
         writeln!(self.writer, "elapsed_s\t{}", NAMES.join("\t"))?;
         self.header_pending = false;
@@ -195,6 +197,8 @@ impl SessionLog {
                     crate::network::telemetry::LatencyClass::Limit => 1.0,
                     crate::network::telemetry::LatencyClass::TempoDrag => 2.0,
                 }),
+            Some(f64::from(metrics.direct_peers_mask)),
+            metrics.route_rtt_ms,
         ];
         write!(self.writer, "{elapsed:.3}")?;
         for (values, value) in self.values.iter_mut().zip(row) {

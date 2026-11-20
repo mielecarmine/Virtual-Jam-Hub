@@ -12,6 +12,10 @@ pub struct Telemetry {
     /// Filled by the desktop controller, where the audio configuration is known.
     pub latency: Option<LatencyBudget>,
     pub rtt_ms: Option<f64>,
+    /// Slowest active audio route's RTT; direct links use their matched probe RTT.
+    pub route_rtt_ms: Option<f64>,
+    /// Bit `peer_id` - 1: P2P, unset: SFU. Updated every telemetry interval.
+    pub direct_peers_mask: u8,
     /// Peak of newly measured RTTs in this interval; None when no Pong was received.
     #[cfg_attr(not(feature = "telemetry-log"), allow(dead_code))]
     pub rtt_max_ms: Option<f64>,

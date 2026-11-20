@@ -20,6 +20,7 @@ use std::{
 };
 
 mod clock;
+mod routes;
 pub(crate) mod telemetry;
 use clock::ClockSync;
 use telemetry::ArrivalStats;
@@ -57,6 +58,8 @@ struct Delayed {
 }
 
 pub struct Network {
+    server_addr: SocketAddr,
+    routes: routes::Routes,
     arrivals: BTreeMap<u8, ArrivalStats>,
     telemetry: Option<Telemetry>,
     last_telemetry: Instant,
@@ -70,6 +73,7 @@ pub struct Network {
     metronome: Option<MetronomeState>,
     rendered_metronome: Option<(MetronomeState, i64)>,
     roster: Vec<jam_protocol::PeerInfo>,
+    pending_roster: Option<Vec<jam_protocol::PeerInfo>>,
     roster_changed: bool,
     encoder: opus::Encoder,
     pub codec_lookahead_samples: u32,
@@ -112,8 +116,16 @@ impl Network {
             None if server.is_ipv4() => SocketAddr::from(([0, 0, 0, 0], 0)),
             None => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)),
         };
-        let socket = UdpSocket::bind(bind_addr)?;
-        socket.connect(server)?; // Connected UDP filters datagrams from other endpoints.
+        // Select the OS route before binding the data socket, retaining the chosen
+        // interface for LAN advertisement and explicit --bind-ip routing.
+        let mut data_bind = bind_addr;
+        if data_bind.ip().is_unspecified() {
+            let route_socket = UdpSocket::bind(bind_addr)?;
+            route_socket.connect(server)?;
+            data_bind.set_ip(route_socket.local_addr()?.ip());
+        }
+        let socket = UdpSocket::bind(data_bind)?;
+        let local_addr = socket.local_addr()?;
         socket.set_nonblocking(true)?;
         let mut bytes = [0; NICKNAME_CAPACITY];
         bytes[..nickname.len()].copy_from_slice(nickname.as_bytes());
@@ -123,6 +135,8 @@ impl Network {
             u32::try_from(encoder.get_lookahead().map_err(io::Error::other)?)
                 .map_err(io::Error::other)?;
         Ok(Self {
+            server_addr: server,
+            routes: routes::Routes::default(),
             arrivals: BTreeMap::new(),
             telemetry: None,
             last_telemetry: now,
@@ -136,6 +150,7 @@ impl Network {
             metronome: None,
             rendered_metronome: None,
             roster: Vec::new(),
+            pending_roster: None,
             roster_changed: false,
             encoder,
             codec_lookahead_samples,
@@ -146,7 +161,7 @@ impl Network {
             next_playout: None,
             socket,
             join: ControlMessage::JoinRequest {
-                local_addr: None,
+                local_addr: Some(local_addr),
                 nickname: bytes,
                 nickname_len: u8::try_from(nickname.len()).map_err(io::Error::other)?,
             },
@@ -161,6 +176,10 @@ impl Network {
     }
 
     fn update_roster(&mut self, peers: &[jam_protocol::PeerInfo], speaker: &RxChannels) {
+        if let Some(id) = self.peer_id {
+            self.routes
+                .reconcile(peers, id, self.last_tick.unwrap_or(self.started));
+        }
         let remote: Vec<_> = peers
             .iter()
             .copied()
@@ -307,7 +326,11 @@ impl Network {
     }
 
     fn send(&self, packet: &[u8]) -> io::Result<()> {
-        match self.socket.send(packet) {
+        self.send_to(packet, self.server_addr)
+    }
+
+    fn send_to(&self, packet: &[u8], destination: SocketAddr) -> io::Result<()> {
+        match self.socket.send_to(packet, destination) {
             Ok(length) if length == packet.len() => Ok(()),
             Ok(_) => Err(io::Error::other("Incomplete UDP datagram send")),
             Err(error)
@@ -323,9 +346,13 @@ impl Network {
     }
 
     fn control(&self, message: &ControlMessage) -> io::Result<()> {
+        self.control_to(message, self.server_addr)
+    }
+
+    fn control_to(&self, message: &ControlMessage, destination: SocketAddr) -> io::Result<()> {
         let mut packet = [0; MAX_PACKET_SIZE];
         let length = message.to_bytes(&mut packet).map_err(io::Error::other)?;
-        self.send(&packet[..length])
+        self.send_to(&packet[..length], destination)
     }
 
     fn observe_tick(&mut self, now: Instant) {
@@ -334,6 +361,60 @@ impl Network {
                 .worker_max_gap_ms
                 .max(now.saturating_duration_since(last).as_secs_f64() * 1000.0);
         }
+    }
+
+    fn direct_control(
+        &mut self,
+        message: &ControlMessage,
+        source: SocketAddr,
+        source_peer: Option<u8>,
+        now: Instant,
+    ) {
+        let Some(local_id) = self.peer_id else {
+            return;
+        };
+        match *message {
+            ControlMessage::P2pProbe {
+                sender_peer_id,
+                target_peer_id,
+                client_timestamp_us,
+            } if source_peer == Some(sender_peer_id) && target_peer_id == local_id => {
+                // Even guard-degraded routes answer probes: routing is directional.
+                let _ = self.control_to(
+                    &ControlMessage::P2pAck {
+                        sender_peer_id: local_id,
+                        target_peer_id: sender_peer_id,
+                        echo_timestamp_us: client_timestamp_us,
+                    },
+                    source,
+                );
+            }
+            ControlMessage::P2pAck {
+                sender_peer_id,
+                target_peer_id,
+                echo_timestamp_us,
+            } if source_peer == Some(sender_peer_id) && target_peer_id == local_id => {
+                self.routes
+                    .ack(sender_peer_id, source, echo_timestamp_us, now);
+            }
+            _ => {}
+        }
+    }
+
+    fn maintain_routes(&mut self, now: Instant) -> io::Result<()> {
+        let Some(id) = self.peer_id else {
+            return Ok(());
+        };
+        let leader = self.metronome.map_or(0, |s| s.config.leader_peer_id);
+        self.routes.maintain(now, leader);
+        if let Some(message) = self.routes.report(now) {
+            self.control(&message)?;
+        }
+        for (addr, message) in self.routes.probes(id, now) {
+            // Unreachable candidate endpoints are normal behind NAT/CGNAT.
+            let _ = self.control_to(&message, addr);
+        }
+        Ok(())
     }
 
     fn pong(&mut self, stamp: u64, server_timestamp_us: u64, now: Instant) {
@@ -349,6 +430,58 @@ impl Network {
                 self.clock.observe(stamp, server_timestamp_us, elapsed);
             }
         }
+    }
+
+    fn server_control(
+        &mut self,
+        message: ControlMessage,
+        speaker: &RxChannels,
+        now: Instant,
+    ) -> io::Result<()> {
+        match message {
+            ControlMessage::JoinAccepted {
+                assigned_peer_id,
+                sample_rate,
+            } => {
+                if sample_rate != SAMPLE_RATE {
+                    return Err(io::Error::other("Server sample rate must be 48000 Hz"));
+                }
+                if self.peer_id.is_some_and(|id| id != assigned_peer_id) {
+                    return Err(io::Error::other("Server changed peer ID"));
+                }
+                if self.peer_id.is_none() {
+                    println!("Joined server as peer {assigned_peer_id}");
+                }
+                self.roster_changed |= self.peer_id.is_none();
+                self.peer_id = Some(assigned_peer_id);
+                if let Some(peers) = self.pending_roster.take() {
+                    self.update_roster(&peers, speaker);
+                }
+                self.last_server = now;
+            }
+            ControlMessage::PeerListUpdate { peers } if self.peer_id.is_some() => {
+                self.update_roster(&peers, speaker);
+                self.last_server = now;
+            }
+            ControlMessage::PeerListUpdate { peers } => {
+                self.pending_roster = Some(peers);
+                self.last_server = now;
+            }
+            ControlMessage::Pong {
+                client_timestamp_us,
+                server_timestamp_us,
+            } if self.peer_id.is_some() => {
+                self.pong(client_timestamp_us, server_timestamp_us, now);
+                self.last_server = now;
+            }
+            // State can arrive before JoinAccepted because UDP can reorder packets.
+            ControlMessage::MetronomeState { state } => {
+                self.metronome = Some(state);
+                self.last_server = now;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub(crate) fn tick(
@@ -369,65 +502,52 @@ impl Network {
         // Bound receive work so a busy room cannot starve capture or shutdown.
         let mut packet = [0; MAX_PACKET_SIZE];
         for _ in 0..64 {
-            let length = match self.socket.recv(&mut packet) {
-                Ok(length) => length,
+            let (length, source) = match self.socket.recv_from(&mut packet) {
+                Ok(received) => received,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                // An ICMP error from a failed NAT candidate must not end the room.
                 Err(error)
-                    if error.kind() == io::ErrorKind::ConnectionRefused
-                        && self.peer_id.is_none() =>
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused
+                    ) =>
                 {
-                    break;
+                    continue;
                 }
                 // Winsock reports WSAEMSGSIZE after discarding an oversized datagram.
                 #[cfg(windows)]
                 Err(error) if error.raw_os_error() == Some(10040) => continue,
                 Err(error) => return Err(error),
             };
+            let source_peer = self.routes.source_peer(source);
+            if source != self.server_addr && source_peer.is_none() {
+                continue;
+            }
             let bytes = &packet[..length];
             if let Ok(message) = ControlMessage::from_bytes(bytes) {
-                match message {
-                    ControlMessage::JoinAccepted {
-                        assigned_peer_id,
-                        sample_rate,
-                    } => {
-                        if sample_rate != SAMPLE_RATE {
-                            return Err(io::Error::other("Server sample rate must be 48000 Hz"));
-                        }
-                        if self.peer_id.is_some_and(|id| id != assigned_peer_id) {
-                            return Err(io::Error::other("Server changed peer ID"));
-                        }
-                        if self.peer_id.is_none() {
-                            println!("Joined server as peer {assigned_peer_id}");
-                        }
-                        self.roster_changed |= self.peer_id.is_none();
-                        self.peer_id = Some(assigned_peer_id);
-                        self.last_server = now;
-                    }
-                    ControlMessage::PeerListUpdate { peers } if self.peer_id.is_some() => {
-                        self.update_roster(&peers, speaker);
-                        self.last_server = now;
-                    }
-                    ControlMessage::Pong {
-                        client_timestamp_us,
-                        server_timestamp_us,
-                    } if self.peer_id.is_some() => {
-                        self.pong(client_timestamp_us, server_timestamp_us, now);
-                        self.last_server = now;
-                    }
-                    // State can arrive before JoinAccepted because UDP can reorder packets.
-                    ControlMessage::MetronomeState { state } => {
-                        self.metronome = Some(state);
-                        self.last_server = now;
-                    }
-                    _ => {}
+                if source != self.server_addr {
+                    self.direct_control(&message, source, source_peer, now);
+                    continue;
                 }
+                self.server_control(message, speaker, now)?;
                 continue;
             }
             if let Some(id) = self.peer_id {
+                if source != self.server_addr {
+                    let Some((header, _)) = receive_audio(bytes, id) else {
+                        continue;
+                    };
+                    if source_peer != Some(header.peer_id) {
+                        continue;
+                    }
+                    self.routes
+                        .audio(header.peer_id, source, header.sequence_number, now);
+                }
                 self.incoming(bytes, id, now);
             }
         }
+        self.maintain_routes(now)?;
         self.playback(speaker, now)?;
         self.sync_metronome(speaker, now);
         self.publish_telemetry(now);
@@ -493,7 +613,10 @@ impl Network {
         if config.leader_peer_id == 0 || self.peer_id.is_none_or(|id| id == config.leader_peer_id) {
             return 0;
         }
-        let network_ms = self.rtt.map_or(0.0, |(ms, _)| ms);
+        let network_ms = match self.routes.route(config.leader_peer_id) {
+            Some(routes::Route::Direct { p2p_rtt_ms, .. }) => p2p_rtt_ms / 2.0,
+            _ => self.rtt.map_or(0.0, |(ms, _)| ms),
+        };
         let jitter_samples = self
             .peers
             .get(&config.leader_peer_id)
@@ -563,6 +686,12 @@ impl Network {
             diagnostics.accumulate(peer.diagnostics);
         }
         self.telemetry = Some(Telemetry {
+            direct_peers_mask: self.routes.mask(),
+            route_rtt_ms: self.routes.effective_rtt(
+                self.rtt
+                    .filter(|(_, at)| now.duration_since(*at) < SERVER_TIMEOUT)
+                    .map(|(ms, _)| ms),
+            ),
             latency: None,
             diagnostics,
             audio: crate::audio::AudioTelemetry::default(),
@@ -612,7 +741,15 @@ impl Network {
                 .encoder
                 .encode_float(&samples, &mut packet[AUDIO_HEADER_SIZE..])
                 .map_err(io::Error::other)?;
-            self.send(&packet[..AUDIO_HEADER_SIZE + length])?;
+            let bytes = &packet[..AUDIO_HEADER_SIZE + length];
+            for destination in self.routes.destinations() {
+                // A failed direct send must not stop audio to the other musicians.
+                // The liveness watchdog restores SFU within 600 ms.
+                let _ = self.send_to(bytes, destination);
+            }
+            if self.routes.needs_relay() {
+                self.send(bytes)?;
+            }
             self.sequence = self.sequence.wrapping_add(1);
             self.timestamp = self.timestamp.wrapping_add(120);
         }
@@ -671,5 +808,7 @@ fn receive_audio(packet: &[u8], local_id: u8) -> Option<(AudioHeader, Encoded)> 
     Some((header, payload.try_into().ok()?))
 }
 
+#[cfg(test)]
+mod p2p_tests;
 #[cfg(test)]
 mod tests;
