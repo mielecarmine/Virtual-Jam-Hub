@@ -5,6 +5,8 @@ use crate::{
 
 fn peer(peer_id: u8) -> PeerInfo {
     PeerInfo {
+        public_addr: "127.0.0.1:5000".parse().unwrap(),
+        local_addr: None,
         peer_id,
         nickname: [b'A'; NICKNAME_CAPACITY],
         nickname_len: 32,
@@ -160,11 +162,29 @@ fn metronome_invalid_fields_are_rejected_on_both_paths_without_writes() {
 
 fn messages() -> Vec<ControlMessage> {
     vec![
+        ControlMessage::P2pProbe {
+            sender_peer_id: 1,
+            target_peer_id: 8,
+            client_timestamp_us: 0x0807_0605_0403_0201,
+        },
+        ControlMessage::P2pAck {
+            sender_peer_id: 8,
+            target_peer_id: 1,
+            echo_timestamp_us: u64::MAX,
+        },
+        ControlMessage::DirectRouteUpdate {
+            direct_peers_mask: 0,
+        },
+        ControlMessage::DirectRouteUpdate {
+            direct_peers_mask: 255,
+        },
         ControlMessage::JoinRequest {
+            local_addr: None,
             nickname: [b'Z'; 32],
             nickname_len: 32,
         },
         ControlMessage::JoinRequest {
+            local_addr: None,
             nickname: [0; 32],
             nickname_len: 0,
         },
@@ -282,8 +302,10 @@ fn wire_layout_is_explicit_little_endian_with_fixed_fields() {
     let mut join = vec![0x41, 0x4A, 0x02];
     join.extend_from_slice(&[b'A'; 32]);
     join.push(32);
+    join.extend_from_slice(&[0; 27]);
     cases.push((
         ControlMessage::JoinRequest {
+            local_addr: None,
             nickname: [b'A'; 32],
             nickname_len: 32,
         },
@@ -294,6 +316,11 @@ fn wire_layout_is_explicit_little_endian_with_fixed_fields() {
         list.push(id);
         list.extend_from_slice(&[b'A'; 32]);
         list.push(32);
+        list.extend_from_slice(&[4, 127, 0, 0, 1]);
+        list.extend_from_slice(&[0; 12]);
+        list.extend_from_slice(&5000_u16.to_le_bytes());
+        list.extend_from_slice(&[0; 8]);
+        list.extend_from_slice(&[0; 27]);
     }
     cases.push((
         ControlMessage::PeerListUpdate {
@@ -315,7 +342,7 @@ fn invalid_magic_unknown_types_and_oversized_packets_are_rejected() {
         ControlMessage::from_bytes(&[0, 0, 5]),
         Err(ProtocolError::InvalidMagic)
     );
-    for kind in [0, 1, 10, 255] {
+    for kind in [0, 1, 13, 255] {
         assert_eq!(
             ControlMessage::from_bytes(&[0x41, 0x4A, kind]),
             Err(ProtocolError::UnknownMessageType(kind))
@@ -341,6 +368,7 @@ fn invalid_messages_are_rejected_without_writing_output() {
     let mut invalid = vec![
         (
             ControlMessage::JoinRequest {
+                local_addr: None,
                 nickname: [0; 32],
                 nickname_len: 33,
             },
@@ -397,6 +425,7 @@ fn invalid_messages_are_rejected_without_writing_output() {
 fn malformed_wire_fields_are_rejected() {
     let mut buf = [0; MAX_PACKET_SIZE];
     let size = ControlMessage::JoinRequest {
+        local_addr: None,
         nickname: [0; 32],
         nickname_len: 0,
     }
@@ -430,20 +459,162 @@ fn malformed_wire_fields_are_rejected() {
     }
     .to_bytes(&mut buf)
     .unwrap();
-    buf[38] = 1;
+    buf[92] = 1;
     assert_eq!(
         ControlMessage::from_bytes(&buf[..size]),
         Err(ProtocolError::DuplicatePeerId(1))
     );
-    buf[38] = 0;
+    buf[92] = 0;
     assert_eq!(
         ControlMessage::from_bytes(&buf[..size]),
         Err(ProtocolError::InvalidPeerId(0))
     );
-    buf[38] = 2;
-    buf[71] = 33;
+    buf[92] = 2;
+    buf[125] = 33;
     assert_eq!(
         ControlMessage::from_bytes(&buf[..size]),
         Err(ProtocolError::InvalidNicknameLength(33))
+    );
+}
+
+#[test]
+fn endpoints_round_trip_with_fixed_layout_and_full_room() {
+    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+    let v4: SocketAddr = "192.168.1.20:4660".parse().unwrap();
+    let v6 = SocketAddr::V6(SocketAddrV6::new(
+        Ipv6Addr::LOCALHOST,
+        4660,
+        0x0403_0201,
+        0x0807_0605,
+    ));
+    for local_addr in [None, Some(v4), Some(v6)] {
+        let mut candidates = messages();
+        candidates.push(ControlMessage::JoinRequest {
+            nickname: [0; 32],
+            nickname_len: 0,
+            local_addr,
+        });
+        candidates.push(ControlMessage::PeerListUpdate {
+            peers: (1..=8)
+                .map(|id| PeerInfo {
+                    public_addr: if id % 2 == 0 { v4 } else { v6 },
+                    local_addr,
+                    ..peer(id)
+                })
+                .collect(),
+        });
+        for message in candidates {
+            let mut buf = [0; MAX_PACKET_SIZE];
+            let len = message.to_bytes(&mut buf).unwrap();
+            assert!(len < MAX_PACKET_SIZE);
+            assert_eq!(ControlMessage::from_bytes(&buf[..len]), Ok(message.clone()));
+            if let ControlMessage::PeerListUpdate { peers } = &message {
+                assert_eq!(len, 4 + 88 * peers.len());
+            }
+        }
+    }
+    let message = ControlMessage::JoinRequest {
+        nickname: [0; 32],
+        nickname_len: 0,
+        local_addr: Some(v6),
+    };
+    let mut buf = [0; 63];
+    assert_eq!(message.to_bytes(&mut buf), Ok(63));
+    assert_eq!(buf[36], 6);
+    assert_eq!(&buf[37..53], &Ipv6Addr::LOCALHOST.octets());
+    assert_eq!(&buf[53..], &[0x34, 0x12, 1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn p2p_wire_layout_and_invalid_ids() {
+    for kind in [10, 11] {
+        let mut wire = [0x41, 0x4a, kind, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8];
+        let message = ControlMessage::from_bytes(&wire).unwrap();
+        let mut output = [0; 13];
+        assert_eq!(message.to_bytes(&mut output), Ok(13));
+        assert_eq!(output, wire);
+        for index in [3, 4] {
+            for id in [0, 9, 255] {
+                let original = wire[index];
+                wire[index] = id;
+                assert_eq!(
+                    ControlMessage::from_bytes(&wire),
+                    Err(ProtocolError::InvalidPeerId(id))
+                );
+                wire[index] = original;
+                let invalid = if kind == 10 {
+                    ControlMessage::P2pProbe {
+                        sender_peer_id: if index == 3 { id } else { 1 },
+                        target_peer_id: if index == 4 { id } else { 8 },
+                        client_timestamp_us: 0,
+                    }
+                } else {
+                    ControlMessage::P2pAck {
+                        sender_peer_id: if index == 3 { id } else { 1 },
+                        target_peer_id: if index == 4 { id } else { 8 },
+                        echo_timestamp_us: 0,
+                    }
+                };
+                output.fill(0xcc);
+                assert_eq!(
+                    invalid.to_bytes(&mut output),
+                    Err(ProtocolError::InvalidPeerId(id))
+                );
+                assert_eq!(output, [0xcc; 13]);
+            }
+        }
+    }
+    for mask in 0..=255 {
+        assert_eq!(
+            ControlMessage::from_bytes(&[0x41, 0x4a, 12, mask]),
+            Ok(ControlMessage::DirectRouteUpdate {
+                direct_peers_mask: mask
+            })
+        );
+    }
+}
+
+#[test]
+fn malformed_endpoint_encodings_are_rejected() {
+    let mut buf = [0; MAX_PACKET_SIZE];
+    let len = ControlMessage::JoinRequest {
+        nickname: [0; 32],
+        nickname_len: 0,
+        local_addr: None,
+    }
+    .to_bytes(&mut buf)
+    .unwrap();
+    for family in [1, 5, 255] {
+        buf[36] = family;
+        assert_eq!(
+            ControlMessage::from_bytes(&buf[..len]),
+            Err(ProtocolError::InvalidEndpoint)
+        );
+    }
+    buf[36] = 0;
+    buf[37] = 1;
+    assert_eq!(
+        ControlMessage::from_bytes(&buf[..len]),
+        Err(ProtocolError::InvalidEndpoint)
+    );
+    buf[37] = 0;
+    buf[36] = 4;
+    for index in [41, 55, 59] {
+        buf[index] = 1;
+        assert_eq!(
+            ControlMessage::from_bytes(&buf[..len]),
+            Err(ProtocolError::InvalidEndpoint)
+        );
+        buf[index] = 0;
+    }
+    let len = ControlMessage::PeerListUpdate {
+        peers: vec![peer(1)],
+    }
+    .to_bytes(&mut buf)
+    .unwrap();
+    buf[38..65].fill(0); // public address cannot be absent
+    assert_eq!(
+        ControlMessage::from_bytes(&buf[..len]),
+        Err(ProtocolError::InvalidEndpoint)
     );
 }

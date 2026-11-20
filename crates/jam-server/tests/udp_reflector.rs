@@ -24,6 +24,7 @@ impl Room {
             send_control(
                 &socket,
                 &ControlMessage::JoinRequest {
+                    local_addr: None,
                     nickname: [0; NICKNAME_CAPACITY],
                     nickname_len: 0,
                 },

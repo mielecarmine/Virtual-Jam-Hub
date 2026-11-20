@@ -14,6 +14,8 @@ struct ClientSession {
     // exactly, while keeping a readable String in the in-memory session.
     wire_nickname: [u8; NICKNAME_CAPACITY],
     nickname_len: u8,
+    local_addr: Option<SocketAddr>,
+    direct_peers_mask: u8,
 }
 
 #[derive(Default)]
@@ -34,6 +36,7 @@ impl SessionTable {
         nickname: [u8; NICKNAME_CAPACITY],
         nickname_len: u8,
         now: Instant,
+        local_addr: Option<SocketAddr>,
     ) -> Option<u8> {
         let peer_id = if let Some(session) = self.clients.get(&source) {
             session.peer_id
@@ -50,6 +53,8 @@ impl SessionTable {
                 last_seen: now,
                 wire_nickname: nickname,
                 nickname_len,
+                local_addr,
+                direct_peers_mask: 0,
             },
         );
         Some(peer_id)
@@ -80,6 +85,7 @@ impl SessionTable {
             .is_some_and(|session| session.peer_id == peer_id)
         {
             self.clients.remove(&source);
+            self.clear_missing_routes();
             return true;
         }
         false
@@ -89,14 +95,18 @@ impl SessionTable {
         let previous_count = self.clients.len();
         self.clients
             .retain(|_, session| now.duration_since(session.last_seen) <= SESSION_TIMEOUT);
-        self.clients.len() != previous_count
+        let changed = self.clients.len() != previous_count;
+        if changed {
+            self.clear_missing_routes();
+        }
+        changed
     }
 
     pub(super) fn peers(&self) -> Vec<PeerInfo> {
         let mut peers: Vec<_> = self
             .clients
-            .values()
-            .map(|session| {
+            .iter()
+            .map(|(public_addr, session)| {
                 debug_assert_eq!(
                     session.nickname,
                     String::from_utf8_lossy(
@@ -107,11 +117,48 @@ impl SessionTable {
                     peer_id: session.peer_id,
                     nickname: session.wire_nickname,
                     nickname_len: session.nickname_len,
+                    public_addr: *public_addr,
+                    local_addr: session.local_addr,
                 }
             })
             .collect();
         peers.sort_unstable_by_key(|peer| peer.peer_id);
         peers
+    }
+
+    fn active_mask(&self) -> u8 {
+        self.clients
+            .values()
+            .fold(0, |mask, session| mask | (1 << (session.peer_id - 1)))
+    }
+
+    fn clear_missing_routes(&mut self) {
+        let active = self.active_mask();
+        for session in self.clients.values_mut() {
+            session.direct_peers_mask &= active;
+        }
+    }
+
+    pub(super) fn update_direct_routes(&mut self, source: SocketAddr, mask: u8, now: Instant) {
+        let active = self.active_mask();
+        if let Some(session) = self.clients.get_mut(&source) {
+            // Ignore self and inactive IDs so later joins always start on the SFU.
+            session.direct_peers_mask = mask & active & !(1 << (session.peer_id - 1));
+            session.last_seen = now;
+        }
+    }
+
+    pub(super) fn relay_addresses(
+        &self,
+        source: SocketAddr,
+    ) -> impl Iterator<Item = SocketAddr> + '_ {
+        let mask = self
+            .clients
+            .get(&source)
+            .map_or(0, |session| session.direct_peers_mask);
+        self.clients.iter().filter_map(move |(address, session)| {
+            (*address != source && mask & (1 << (session.peer_id - 1)) == 0).then_some(*address)
+        })
     }
 
     pub(super) fn addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {

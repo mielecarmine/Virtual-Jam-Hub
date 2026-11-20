@@ -146,6 +146,7 @@ impl Network {
             next_playout: None,
             socket,
             join: ControlMessage::JoinRequest {
+                local_addr: None,
                 nickname: bytes,
                 nickname_len: u8::try_from(nickname.len()).map_err(io::Error::other)?,
             },
