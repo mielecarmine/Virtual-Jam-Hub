@@ -6,6 +6,9 @@ resolver = "2"
 version = "1.0.5-beta"
 edition = "2024"
 rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/mielecarmine/Virtual-Jam-Hub"
+homepage = "https://github.com/mielecarmine/Virtual-Jam-Hub#readme"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
