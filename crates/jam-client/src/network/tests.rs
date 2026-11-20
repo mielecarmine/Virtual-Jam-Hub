@@ -1456,3 +1456,83 @@ fn connect_with_bind_validates_ip_family_and_simulated_delay_offsets_rtt_and_aud
     network.pong(7, 1_000_000, start + Duration::from_millis(2));
     assert_eq!(network.rtt, Some((32.0, start + Duration::from_millis(2))));
 }
+
+#[test]
+fn caught_up_udp_burst_in_one_tick_does_not_rewind_or_skip_after_40_ms_pause() {
+    for initial in [100_u32, u32::MAX - 10] {
+        for count in 12..=20_u32 {
+            for target in [3, 8, 16] {
+                let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+                let mut network = Network::connect(server.local_addr().unwrap(), "burst").unwrap();
+                network.peer_id = Some(1);
+                let start = network.started;
+                let mut peer = PeerJitterBuffer::new(initial, start, target).unwrap();
+                let ready = peer.ready_at;
+                for _ in 0..17 {
+                    peer.pop(ready).unwrap();
+                }
+                let cursor = initial.wrapping_add(17);
+                let now = ready + Duration::from_millis(40);
+                network.peers.insert(2, peer);
+                network.next_playout = Some(now);
+                let mut encoder = codec::encoder().unwrap();
+                for offset in 0..count {
+                    network.delayed.push(Delayed {
+                        due: now - Duration::from_micros(u64::from(count - offset)),
+                        peer: 2,
+                        sequence: cursor.wrapping_sub(count - 1).wrapping_add(offset),
+                        chunk: codec::tests::encode(&mut encoder, 0.5),
+                    });
+                }
+                let (_, mut mic) = RingBuffer::new(1);
+                let (mut speaker, _) = crate::mixer::channels(64);
+                network.tick(&mut mic, &mut speaker, now).unwrap();
+                let peer = &network.peers[&2];
+                assert_eq!(
+                    peer.diagnostics.resyncs, 0,
+                    "count={count}, target={target}"
+                );
+                assert_eq!(peer.diagnostics.skipped_frames, 0);
+                assert_eq!(peer.diagnostics.late_dropped, count - 1);
+                assert_eq!(peer.target_chunks(), target);
+                assert_eq!(peer.ready_at, ready);
+            }
+        }
+    }
+}
+
+#[test]
+fn future_or_other_peer_packets_do_not_hide_a_genuinely_late_stream() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "late").unwrap();
+    let start = network.started;
+    let mut peer = PeerJitterBuffer::new(100, start, 3).unwrap();
+    peer.pop(peer.ready_at).unwrap();
+    network.peers.insert(2, peer);
+    let now = start + Duration::from_secs(1);
+    network.next_playout = Some(now + Duration::from_secs(1));
+    let mut enc = codec::encoder().unwrap();
+    for sequence in 80..90 {
+        network.delayed.push(Delayed {
+            due: now + CHUNK_TIME * (sequence - 80),
+            peer: 2,
+            sequence,
+            chunk: codec::tests::encode(&mut enc, 0.5),
+        });
+    }
+    for (peer, due) in [(2, now + Duration::from_secs(1)), (3, now)] {
+        network.delayed.push(Delayed {
+            due,
+            peer,
+            sequence: 101,
+            chunk: codec::tests::encode(&mut enc, 0.5),
+        });
+    }
+    let (mut speaker, _) = crate::mixer::channels(64);
+    for tick in 0..8 {
+        network
+            .playback(&mut speaker, now + CHUNK_TIME * tick)
+            .unwrap();
+    }
+    assert_eq!(network.peers[&2].diagnostics.resyncs, 1);
+}

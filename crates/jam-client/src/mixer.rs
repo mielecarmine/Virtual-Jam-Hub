@@ -25,7 +25,6 @@ const STARVATION_SAMPLES: usize = FRAME_SAMPLES;
 struct Continuity {
     last: f32,
     missing: usize,
-    debt: usize,
     offset: f32,
     fade_in: u16,
 }
@@ -277,6 +276,8 @@ impl Mixer {
         self.align(data.len() / channels, stats);
         self.metronome.begin_block();
         let mut peaks = [0.0_f32; MAX_PEERS];
+        let missing_before = self.continuity.map(|continuity| continuity.missing);
+        let mut block_missing = [0_usize; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
             let solo = (self.local.is_some() && self.local_control.solo.load(Ordering::Relaxed))
                 || self.controls.iter().any(|c| {
@@ -295,15 +296,6 @@ impl Mixer {
                     continue;
                 }
                 let continuity = &mut self.continuity[index];
-                // Missing output advanced wall time, but not the source cursor. Retire
-                // that debt before resuming so repeated glitches cannot add latency.
-                if self.ready[index] {
-                    for _ in 0..continuity.debt.min(ring.slots()) {
-                        let _ = ring.pop();
-                        continuity.debt -= 1;
-                        stats.align_dropped_samples.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
                 // Bounded by the queue capacity, including stale samples after a disconnect.
                 let mut sample = None;
                 for _ in 0..if self.ready[index] { ring.slots() } else { 0 } {
@@ -320,13 +312,12 @@ impl Mixer {
                         continue;
                     }
                 } else if sample.is_none() {
-                    continuity.debt = continuity.debt.saturating_add(1);
+                    block_missing[index] += 1;
                     stats.output_underflows.fetch_add(1, Ordering::Relaxed);
                 }
                 let value = continuity.render(sample);
                 if self.ready[index] && continuity.missing >= STARVATION_SAMPLES {
                     self.ready[index] = false;
-                    continuity.debt = 0;
                 }
                 if value.is_finite() {
                     *peak = peak.max(value.abs());
@@ -347,6 +338,18 @@ impl Mixer {
             #[allow(clippy::cast_possible_truncation)]
             let output = sum.tanh() as f32;
             frame.fill(T::from_sample(output));
+        }
+        // A partial block cannot erase starvation history with a few isolated samples.
+        // Latency excess is retired only by align(), with a complete callback + reserve.
+        for (index, missing) in block_missing.into_iter().enumerate() {
+            if missing > 0 {
+                self.continuity[index].missing = missing_before[index]
+                    .saturating_add(missing)
+                    .min(STARVATION_SAMPLES);
+                if self.continuity[index].missing >= STARVATION_SAMPLES {
+                    self.ready[index] = false;
+                }
+            }
         }
         self.metronome.end_block();
         for (control, peak) in self.controls.iter().zip(peaks) {

@@ -1,4 +1,4 @@
-//! Best-effort scheduling for the dedicated controller, never CPAL callbacks.
+//! Best-effort scheduling for the dedicated controller and UDP worker, never CPAL callbacks.
 // Native handles remain on their registering thread for their entire lifetime.
 #![allow(unsafe_code)]
 
@@ -99,6 +99,7 @@ mod platform {
 }
 
 pub use platform::controller;
+pub use platform::controller as udp_worker;
 
 #[cfg(all(target_os = "macos", feature = "telemetry-log"))]
 pub use platform::logger;
