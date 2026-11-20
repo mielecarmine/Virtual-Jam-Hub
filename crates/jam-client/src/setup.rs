@@ -22,6 +22,9 @@ pub struct Preferences {
     pub input: Option<String>,
     pub output: Option<String>,
     pub buffer_frames: u32,
+    pub share_telemetry: bool,
+    pub telemetry_endpoint: Option<String>,
+    pub telemetry_token: Option<String>,
 }
 
 impl Default for Preferences {
@@ -33,6 +36,9 @@ impl Default for Preferences {
             input: None,
             output: None,
             buffer_frames: 128,
+            share_telemetry: false,
+            telemetry_endpoint: None,
+            telemetry_token: None,
         }
     }
 }
@@ -82,6 +88,42 @@ impl Preferences {
             return Err(error);
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn report_target(&self) -> Option<crate::session_report::ReportTarget> {
+        if !self.share_telemetry {
+            return None;
+        }
+        let endpoint = self
+            .telemetry_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                std::env::var("JAM_TELEMETRY_ENDPOINT")
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or_else(|| crate::session_report::DEFAULT_BETA_CLIENT_ENDPOINT.to_owned());
+        let beta_token = self
+            .telemetry_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                std::env::var("JAM_TELEMETRY_TOKEN")
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            });
+        Some(crate::session_report::ReportTarget {
+            endpoint,
+            beta_token,
+        })
     }
 }
 

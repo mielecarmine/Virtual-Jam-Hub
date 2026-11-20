@@ -15,7 +15,8 @@ Windows: --host asio selects the vendor ASIO driver; --host wasapi selects WASAP
 Linux: --host alsa; use a hardware device name for direct ALSA, default/pipewire for PipeWire.
 macOS: --host coreaudio.
 UDP: --jitter-chunks 3 (1..=16), --simulate-loss 0.02 (0..=1), --simulate-jitter-ms 10 (0..=1000),
-     --simulate-delay-ms 15 (0..=1000), --bind-ip IP, --metronome-bpm 120 (30..=300).";
+     --simulate-delay-ms 15 (0..=1000), --bind-ip IP, --metronome-bpm 120 (30..=300).
+Telemetry (opt-in): --share-logs (or JAM_SHARE_LOGS=1), --telemetry-endpoint URL, --telemetry-token TOKEN.";
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {
@@ -30,11 +31,42 @@ pub struct Options {
     pub buffer_frames: u32,
     pub metronome_bpm: Option<u16>,
     pub telemetry_dir: Option<PathBuf>,
+    pub share_logs: bool,
+    pub telemetry_endpoint: Option<String>,
+    pub telemetry_token: Option<String>,
     pub synthetic: bool,
     pub list: bool,
 }
 
 impl Options {
+    #[must_use]
+    pub fn report_target(&self) -> Option<crate::session_report::ReportTarget> {
+        let env_share = std::env::var("JAM_SHARE_LOGS")
+            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"));
+        let env_endpoint = std::env::var("JAM_TELEMETRY_ENDPOINT")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let endpoint = self
+            .telemetry_endpoint
+            .clone()
+            .or(env_endpoint)
+            .or_else(|| {
+                (self.share_logs || env_share)
+                    .then(|| crate::session_report::DEFAULT_BETA_CLIENT_ENDPOINT.to_owned())
+            })?;
+        let beta_token = self.telemetry_token.clone().or_else(|| {
+            std::env::var("JAM_TELEMETRY_TOKEN")
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+        });
+        Some(crate::session_report::ReportTarget {
+            endpoint,
+            beta_token,
+        })
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Self>, Box<dyn Error>> {
         let mut args = args.into_iter();
@@ -50,6 +82,9 @@ impl Options {
             buffer_frames: 128,
             metronome_bpm: None,
             telemetry_dir: None,
+            share_logs: false,
+            telemetry_endpoint: None,
+            telemetry_token: None,
             synthetic: false,
             list: false,
         };
@@ -61,6 +96,7 @@ impl Options {
                 }
                 "--list-devices" => options.list = true,
                 "--synthetic" => options.synthetic = true,
+                "--share-logs" => options.share_logs = true,
                 "--jitter-chunks"
                 | "--simulate-loss"
                 | "--simulate-jitter-ms"
@@ -69,6 +105,8 @@ impl Options {
                 | "--buffer-frames"
                 | "--metronome-bpm"
                 | "--telemetry-dir"
+                | "--telemetry-endpoint"
+                | "--telemetry-token"
                 | "--host"
                 | "--input"
                 | "--output"
@@ -124,6 +162,8 @@ impl Options {
                             options.metronome_bpm = Some(bpm);
                         }
                         "--telemetry-dir" => options.telemetry_dir = Some(PathBuf::from(value)),
+                        "--telemetry-endpoint" => options.telemetry_endpoint = Some(value),
+                        "--telemetry-token" => options.telemetry_token = Some(value),
                         "--host" => options.host = Some(value),
                         "--server" => options.server = Some(value.parse()?),
                         "--nickname" => {

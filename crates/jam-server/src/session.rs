@@ -91,15 +91,24 @@ impl SessionTable {
         false
     }
 
-    pub(super) fn expire(&mut self, now: Instant) -> bool {
+    pub(super) fn len(&self) -> usize {
+        self.clients.len()
+    }
+
+    pub(super) fn expire_count(&mut self, now: Instant) -> usize {
         let previous_count = self.clients.len();
         self.clients
             .retain(|_, session| now.duration_since(session.last_seen) <= SESSION_TIMEOUT);
-        let changed = self.clients.len() != previous_count;
-        if changed {
+        let expired = previous_count.saturating_sub(self.clients.len());
+        if expired > 0 {
             self.clear_missing_routes();
         }
-        changed
+        expired
+    }
+
+    #[cfg(test)]
+    pub(super) fn expire(&mut self, now: Instant) -> bool {
+        self.expire_count(now) > 0
     }
 
     pub(super) fn peers(&self) -> Vec<PeerInfo> {
@@ -139,13 +148,25 @@ impl SessionTable {
         }
     }
 
-    pub(super) fn update_direct_routes(&mut self, source: SocketAddr, mask: u8, now: Instant) {
+    pub(super) fn update_direct_routes(
+        &mut self,
+        source: SocketAddr,
+        mask: u8,
+        now: Instant,
+    ) -> Option<(u8, u8)> {
         let active = self.active_mask();
-        if let Some(session) = self.clients.get_mut(&source) {
-            // Ignore self and inactive IDs so later joins always start on the SFU.
-            session.direct_peers_mask = mask & active & !(1 << (session.peer_id - 1));
-            session.last_seen = now;
-        }
+        let session = self.clients.get_mut(&source)?;
+        // Ignore self and inactive IDs so later joins always start on the SFU.
+        let sanitized = mask & active & !(1 << (session.peer_id - 1));
+        session.direct_peers_mask = sanitized;
+        session.last_seen = now;
+        Some((session.peer_id, sanitized))
+    }
+
+    pub(super) fn direct_bypass_count(&self, source: SocketAddr) -> usize {
+        self.clients.get(&source).map_or(0, |session| {
+            usize::try_from(session.direct_peers_mask.count_ones()).unwrap_or(0)
+        })
     }
 
     pub(super) fn relay_addresses(

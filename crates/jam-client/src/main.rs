@@ -10,6 +10,7 @@ mod mixer;
 mod monitor;
 mod network;
 mod scheduling;
+mod session_report;
 mod setup;
 mod streams;
 #[cfg(feature = "telemetry-log")]
@@ -293,8 +294,11 @@ fn run_synthetic_session(
     let mut log: Option<telemetry_log::AsyncSessionLog> = None;
     #[cfg(feature = "telemetry-log")]
     let (events_tx, _events_rx) = crossbeam_channel::unbounded();
-    #[cfg(feature = "telemetry-log")]
     let mut remote_peers = 0_u32;
+    let mut session_report: Option<(
+        session_report::SessionReportAccumulator,
+        session_report::ReportTarget,
+    )> = None;
 
     let callback_period =
         Duration::from_nanos((u64::from(options.buffer_frames) * 1_000_000_000) / 48_000);
@@ -326,6 +330,19 @@ fn run_synthetic_session(
         network.tick(&mut mic_consumer, &mut rx, Instant::now())?;
         if !connected && network.is_connected() {
             connected = true;
+            if let Some(target) = options.report_target() {
+                session_report = Some((
+                    session_report::SessionReportAccumulator::start(
+                        session_report::SessionMetadata {
+                            audio_backend: "synthetic-headless".into(),
+                            sample_rate_hz: jam_protocol::SAMPLE_RATE,
+                            buffer_frames: options.buffer_frames,
+                            peer_id: network.local_peer_id(),
+                        },
+                    ),
+                    target,
+                ));
+            }
             #[cfg(feature = "telemetry-log")]
             if let Some(dir) = &options.telemetry_dir {
                 let preferences = setup::Preferences {
@@ -335,6 +352,7 @@ fn run_synthetic_session(
                     input: Some("400 Hz sine (synthetic)".into()),
                     output: Some("in-memory mixer (synthetic)".into()),
                     buffer_frames: options.buffer_frames,
+                    ..setup::Preferences::default()
                 };
                 let audio_info = telemetry_log::AudioInfo {
                     input_channels: 1,
@@ -360,12 +378,7 @@ fn run_synthetic_session(
             }
         }
         if let Some(roster) = network.take_roster() {
-            #[cfg(feature = "telemetry-log")]
-            {
-                remote_peers = u32::try_from(roster.len()).unwrap_or(u32::MAX);
-            }
-            #[cfg(not(feature = "telemetry-log"))]
-            let _ = roster;
+            remote_peers = u32::try_from(roster.len()).unwrap_or(u32::MAX);
         }
         if let Some(mut metrics) = network.take_telemetry() {
             metrics.audio = stats.telemetry();
@@ -376,19 +389,17 @@ fn run_synthetic_session(
                 metrics.route_rtt_ms,
                 metrics.buffer_ms,
             ));
+            let xruns = [
+                stats.input_overflows.load(Ordering::Relaxed),
+                stats.output_underflows.load(Ordering::Relaxed),
+            ];
             #[cfg(feature = "telemetry-log")]
             if let Some(writer) = log.as_mut() {
-                writer.record(
-                    remote_peers,
-                    metrics,
-                    [
-                        stats.input_overflows.load(Ordering::Relaxed),
-                        stats.output_underflows.load(Ordering::Relaxed),
-                    ],
-                );
+                writer.record(remote_peers, metrics, xruns);
             }
-            #[cfg(not(feature = "telemetry-log"))]
-            let _ = metrics.latency;
+            if let Some((accumulator, _)) = session_report.as_mut() {
+                accumulator.record(remote_peers, metrics, xruns);
+            }
         }
         thread::sleep(Duration::from_micros(250));
     }
@@ -396,6 +407,11 @@ fn run_synthetic_session(
     network.disconnect();
     #[cfg(feature = "telemetry-log")]
     drop(log);
+    if let Some((accumulator, target)) = session_report.take() {
+        if let Some(handle) = session_report::upload_async(accumulator.finalize(), target) {
+            let _ = handle.join();
+        }
+    }
     Ok((stats, completed))
 }
 

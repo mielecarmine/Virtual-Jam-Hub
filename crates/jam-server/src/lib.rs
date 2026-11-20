@@ -1,6 +1,7 @@
 //! UDP audio reflector, room membership and watchdog for the headless Virtual Jam server.
 
 mod session;
+pub mod telemetry;
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use jam_protocol::{AudioHeader, ControlMessage, MAX_PACKET_SIZE, MetronomeState, SAMPLE_RATE};
 use session::SessionTable;
+use telemetry::{ServerEvent, TelemetryConfig, TelemetryShipper};
 
 /// Maximum idle wait between watchdog scans, even when no packets arrive.
 pub const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -21,6 +23,7 @@ pub struct Server {
     started: Instant,
     metronome: MetronomeState,
     last_reflection_duration: Option<Duration>,
+    telemetry: Option<TelemetryShipper>,
 }
 
 impl Server {
@@ -29,6 +32,17 @@ impl Server {
     /// # Errors
     /// Returns socket binding or timeout configuration errors.
     pub fn bind(address: impl ToSocketAddrs) -> io::Result<Self> {
+        Self::bind_with_telemetry(address, None)
+    }
+
+    /// Binds a UDP socket with optional asynchronous log shipping on a dedicated thread.
+    ///
+    /// # Errors
+    /// Returns socket binding or timeout configuration errors.
+    pub fn bind_with_telemetry(
+        address: impl ToSocketAddrs,
+        telemetry: Option<TelemetryConfig>,
+    ) -> io::Result<Self> {
         let socket = UdpSocket::bind(address)?;
         socket.set_read_timeout(Some(RECEIVE_TIMEOUT))?;
         Ok(Self {
@@ -37,6 +51,7 @@ impl Server {
             started: Instant::now(),
             metronome: MetronomeState::default(),
             last_reflection_duration: None,
+            telemetry: telemetry.map(TelemetryShipper::start),
         })
     }
 
@@ -74,7 +89,7 @@ impl Server {
             Ok((length, source)) if length < MAX_PACKET_SIZE => {
                 self.handle(&buffer[..length], source, now);
             }
-            Ok(_) => {}
+            Ok(_) => self.record(ServerEvent::PacketDropped),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -84,25 +99,67 @@ impl Server {
                 ) => {}
             // Winsock consumes oversized UDP datagrams but reports WSAEMSGSIZE.
             #[cfg(windows)]
-            Err(error) if error.raw_os_error() == Some(10040) => {}
-            Err(error) => return Err(error),
+            Err(error) if error.raw_os_error() == Some(10040) => {
+                self.record(ServerEvent::PacketDropped);
+            }
+            Err(error) => {
+                self.record(ServerEvent::SocketError);
+                return Err(error);
+            }
         }
         Ok(())
     }
 
+    fn record(&self, event: ServerEvent) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record(event);
+        }
+    }
+
+    fn active_peers_u8(&self) -> u8 {
+        u8::try_from(self.sessions.len()).unwrap_or(u8::MAX)
+    }
+
+    fn handle_audio(
+        &mut self,
+        packet: &[u8],
+        header: AudioHeader,
+        source: SocketAddr,
+        now: Instant,
+    ) {
+        if self.sessions.touch(source, header.peer_id, now) {
+            let mut relayed = 0_u8;
+            let mut send_error = false;
+            for destination in self.sessions.relay_addresses(source) {
+                if let Err(error) = self.socket.send_to(packet, destination) {
+                    eprintln!("UDP audio to {destination} failed: {error}");
+                    send_error = true;
+                } else {
+                    relayed = relayed.saturating_add(1);
+                }
+            }
+            let direct_bypassed =
+                u8::try_from(self.sessions.direct_bypass_count(source)).unwrap_or(u8::MAX);
+            self.record(ServerEvent::AudioForwarded {
+                relayed_destinations: relayed,
+                direct_bypassed,
+            });
+            if send_error {
+                self.record(ServerEvent::SocketError);
+            }
+            self.last_reflection_duration = Some(now.elapsed());
+        } else {
+            self.record(ServerEvent::PacketDropped);
+        }
+    }
+
     fn handle(&mut self, packet: &[u8], source: SocketAddr, now: Instant) {
         if let Ok(header) = AudioHeader::from_bytes(packet) {
-            if self.sessions.touch(source, header.peer_id, now) {
-                for destination in self.sessions.relay_addresses(source) {
-                    if let Err(error) = self.socket.send_to(packet, destination) {
-                        eprintln!("UDP audio to {destination} failed: {error}");
-                    }
-                }
-                self.last_reflection_duration = Some(now.elapsed());
-            }
+            self.handle_audio(packet, header, source, now);
             return;
         }
         let Ok(message) = ControlMessage::from_bytes(packet) else {
+            self.record(ServerEvent::PacketDropped);
             return;
         };
         match message {
@@ -116,8 +173,13 @@ impl Server {
                         .join(source, nickname, nickname_len, now, local_addr)
                 else {
                     // The current protocol has no room-full rejection message.
+                    self.record(ServerEvent::PacketDropped);
                     return;
                 };
+                self.record(ServerEvent::Join {
+                    peer_id,
+                    active_peers: self.active_peers_u8(),
+                });
                 self.send(
                     &ControlMessage::JoinAccepted {
                         assigned_peer_id: peer_id,
@@ -151,6 +213,10 @@ impl Server {
             }
             ControlMessage::Leave { peer_id } => {
                 if self.sessions.remove(source, peer_id) {
+                    self.record(ServerEvent::Leave {
+                        peer_id,
+                        active_peers: self.active_peers_u8(),
+                    });
                     self.broadcast_peers();
                     self.reset_missing_leader();
                 }
@@ -173,8 +239,15 @@ impl Server {
                 }
             }
             ControlMessage::DirectRouteUpdate { direct_peers_mask } => {
-                self.sessions
-                    .update_direct_routes(source, direct_peers_mask, now);
+                if let Some((peer_id, sanitized_mask)) =
+                    self.sessions
+                        .update_direct_routes(source, direct_peers_mask, now)
+                {
+                    self.record(ServerEvent::DirectRouteUpdate {
+                        peer_id,
+                        direct_peers_mask: sanitized_mask,
+                    });
+                }
             }
             ControlMessage::P2pProbe { .. }
             | ControlMessage::P2pAck { .. }
@@ -186,7 +259,12 @@ impl Server {
     }
 
     fn expire_sessions(&mut self, now: Instant) {
-        if self.sessions.expire(now) {
+        let expired = self.sessions.expire_count(now);
+        if expired > 0 {
+            self.record(ServerEvent::WatchdogTimeout {
+                expired_count: u8::try_from(expired).unwrap_or(u8::MAX),
+                active_peers: self.active_peers_u8(),
+            });
             self.broadcast_peers();
             self.reset_missing_leader();
         }
@@ -226,6 +304,7 @@ impl Server {
             Ok(length) => {
                 if let Err(error) = self.socket.send_to(&buffer[..length], destination) {
                     eprintln!("UDP reply to {destination} failed: {error}");
+                    self.record(ServerEvent::SocketError);
                 }
             }
             Err(error) => eprintln!("Cannot encode server message: {error}"),

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/jam-protocol", "crates/jam-server", "crates/jam-client"]
+members = ["crates/jam-protocol", "crates/jam-server", "crates/jam-client", "crates/jam-collector"]
 resolver = "2"
 
 [workspace.package]
