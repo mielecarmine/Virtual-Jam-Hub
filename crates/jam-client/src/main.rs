@@ -373,7 +373,7 @@ fn run_synthetic_session(
                 options.buffer_frames,
                 metrics.audio.last_output_frames,
                 network.codec_lookahead_samples,
-                metrics.rtt_ms,
+                metrics.route_rtt_ms,
                 metrics.buffer_ms,
             ));
             #[cfg(feature = "telemetry-log")]

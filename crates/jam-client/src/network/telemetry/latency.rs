@@ -47,7 +47,8 @@ pub struct LatencyBudget {
 impl LatencyBudget {
     /// Capture uses the requested block; playback uses the observed driver block,
     /// falling back to the requested block before the first output callback.
-    /// RTT is the server round-trip proxy, not a measured peer-to-peer audio path.
+    /// RTT is the slowest active audio route: matched P2P probe RTT when direct,
+    /// otherwise the SFU server round-trip proxy. It excludes remote audio hardware.
     pub fn estimate(
         buffer_frames: u32,
         last_output_frames: u32,

@@ -175,6 +175,8 @@ fn extended_columns_preserve_units_peaks_counters_and_device_configuration() {
     let mut log = SessionLog::start(&path, &Preferences::default(), audio).unwrap();
     let metrics = Telemetry {
         latency: None,
+        route_rtt_ms: Some(4.0),
+        direct_peers_mask: 2,
         rtt_ms: Some(23.0),
         rtt_max_ms: Some(81.0),
         worker_max_gap_ms: 15.625,

@@ -569,12 +569,12 @@ La barra di stato mostra «Latenza E2E: ~X.X ms» con tre fasce: verde sotto
 20 ms, giallo da 20 a 25 ms inclusi, rosso oltre 25 ms (rischio tempo-drag).
 Il tooltip scompone la stima one-way in audio I/O locale (buffer di cattura
 richiesto più ultimo blocco di output osservato, con fallback al buffer richiesto),
-frame Opus da 2,5 ms più lookahead interrogato sull'encoder, RTT server / 2 e
+frame Opus da 2,5 ms più lookahead interrogato sull'encoder, RTT della rotta attiva / 2 e
 massimo audio codificato accodato tra peer più riserva SPSC del mixer.
 Il margine rispetto a 25 ms può essere negativo. La riserva SPSC è di 5 ms a
 64 frame e cresce con il blocco di output osservato da 128 frame in su.
 
-È un budget stimato a 48 kHz: RTT server / 2 è un'approssimazione della rete,
+È un budget stimato a 48 kHz: RTT della rotta più lenta / 2 è un'approssimazione della rete,
 non una misura del percorso audio completo tra musicisti; la configurazione
 hardware remota e le latenze interne del driver non sono misurate. Senza RTT
 valido, anche dopo la scadenza della misura, totale, margine e classificazione
@@ -938,6 +938,47 @@ zero ripristina tutti gli inoltri. Il server ignora bit per sé o per ID inattiv
 ripulisce i bit dei peer usciti o scaduti prima del riutilizzo degli ID.
 
 Il layout di join e lista peer è incompatibile con le versioni precedenti:
-aggiornare insieme server e client. Il client attuale invia `local_addr: None`
-e continua a usare il relay; scoperta LAN, hole punching e fallback automatico
-sono previsti da JAM-38.
+aggiornare insieme server e client.
+
+### Motore P2P e fallback — JAM-38
+
+Il client usa un unico socket UDP non connesso per SFU e peer, con `send_to` /
+`recv_from`. L'interfaccia viene scelta con una query di routing locale su un socket
+temporaneo che non invia datagrammi; `--bind-ip` mantiene la selezione esplicita.
+La porta del socket dati è quella pubblicata nel join e riutilizzata dal NAT.
+Il join comunica l'endpoint LAN; gli endpoint LAN dei peer vengono provati soltanto
+quando il roster indica lo stesso IP pubblico. Gli scope IPv6 remoti non vengono
+riutilizzati come indici di interfaccia locali.
+
+Ogni peer parte in `Relayed`: audio via SFU e probe non bloccanti ogni 200 ms.
+Solo gli endpoint del roster possono inviare probe, ACK o audio; la ricerca della
+sorgente usa una hash map e l'ID dichiarato deve coincidere. Solo il server può
+modificare roster, clock e metronomo. Un ACK deve corrispondere a ID, destinatario,
+endpoint e probe pendente entro 600 ms. Il primo candidato confermato vince.
+L'audio va a ciascuna rotta `Direct` e una sola copia raggiunge SFU se resta almeno
+un destinatario `Relayed`. Prima del primo roster, il relay resta disponibile.
+
+Le notifiche `DirectRouteUpdate` precedono l'invio audio nello stesso tick e vengono
+ripetute ogni 200 ms per tollerare la perdita dei datagrammi di controllo. Se non
+arrivano audio diretto o ACK validi per **oltre 600 ms**, il tick ripristina il relay
+senza rifare join né ricreare encoder, decoder o jitter buffer. Dopo un fallback
+attende 2 s prima di riprovare. Il timeout evita la caduta della sessione; i frame
+persi durante un'interruzione di rete restano soggetti alla normale concealment Opus.
+
+Nelle stanze da **5 a 8 musicisti**, il guard limita a **due** le rotte dirette per
+client, dando priorità al Tempo Leader e poi al minor RTT. Se il jitter diretto
+EWMA supera **8 ms**, la rotta degrada a SFU, anche per il Leader: la salute del
+link prevale sulla priorità. Il relay richiede sempre un solo flusso in upload.
+
+Il budget usa metà del RTT della rotta attiva più lenta: probe P2P per le rotte
+dirette, Ping/Pong SFU come proxy per quelle relayed. Il Tempo Leader usa metà del
+RTT diretto del solo Leader, oppure la precedente stima delle due tratte SFU.
+`Ping RTT` resta la misura verso il server; la GUI indica `P2P` / `SFU` per peer.
+I log aggiungono due colonne alle 27 precedenti: `direct_peers_mask` (bit
+`peer_id - 1`, uno per P2P) e `route_rtt_ms` (RTT della rotta audio più lenta).
+
+I test includono due client contro `jam-server` reale: handshake automatico,
+notifica della maschera, frame P2P unico, filtro della copia SFU e ripresa del relay
+nel tick a 650 ms senza nuova sessione. Test deterministici coprono soglia esatta
+600/601 ms, retry, endpoint LAN, riuso ID, guard da 2 a 8 musicisti e budget/fase
+Tempo Leader con RTT diretto.
