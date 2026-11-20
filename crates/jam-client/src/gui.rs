@@ -623,7 +623,7 @@ mod tests {
     fn tempo_drag_suggestion_requires_known_latency_above_25_and_room_click_off() {
         use crate::network::telemetry::LatencyBudget;
         assert!(!tempo_drag_hint(None, false));
-        for (rtt, expected) in [(10.0, false), (10.002, true)] {
+        for (rtt, expected) in [(35.0, false), (35.002, true)] {
             let budget = Some(LatencyBudget::estimate(0, 0, 0, Some(rtt), 0.0));
             assert_eq!(tempo_drag_hint(budget, false), expected);
             assert!(!tempo_drag_hint(budget, true));

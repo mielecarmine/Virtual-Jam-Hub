@@ -485,28 +485,35 @@ impl Network {
         self.peer_id
     }
 
-    /// Server RTT / 2 is a transit proxy: the protocol does not measure the leader's
-    /// uplink or hardware. Use only the leader's jitter queue, never the room maximum.
-    fn leader_phase_delay_samples(&self, config: MetronomeConfig) -> u32 {
+    /// The protocol does not report the leader's RTT or hardware. Approximate its
+    /// uplink with local RTT/2, plus local RTT/2 for the SFU downlink; use local
+    /// capture hardware as the leader's capture proxy. These are estimates.
+    fn leader_phase_delay_samples(&self, config: MetronomeConfig, speaker: &RxChannels) -> u32 {
         if config.leader_peer_id == 0 || self.peer_id.is_none_or(|id| id == config.leader_peer_id) {
             return 0;
         }
-        let network_ms = self.rtt.map_or(0.0, |(ms, _)| ms / 2.0);
-        let jitter_ms = self
+        let network_ms = self.rtt.map_or(0.0, |(ms, _)| ms);
+        let jitter_samples = self
             .peers
             .get(&config.leader_peer_id)
-            .map_or(0.0, PeerJitterBuffer::buffered_ms);
-        // Bounded by the RTT timeout and the fixed jitter-buffer capacity.
+            .map_or(0, |peer| peer.target_chunks() * FRAME_SAMPLES);
+        let output_frames = speaker.output_frames.load(Ordering::Relaxed) as usize;
+        let local_samples = speaker.capture_frames
+            + output_frames
+            + FRAME_SAMPLES
+            + self.codec_lookahead_samples as usize
+            + jitter_samples
+            + crate::mixer::rx_target_samples(output_frames);
+        // Use the stable adaptive target, never packet-by-packet queue occupancy.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let transit_samples =
-            ((network_ms + jitter_ms) * f64::from(SAMPLE_RATE) / 1000.0).round() as u32;
-        transit_samples.saturating_add(u32::try_from(crate::mixer::RX_TARGET_SAMPLES).unwrap_or(0))
+        let transit_samples = (network_ms * f64::from(SAMPLE_RATE) / 1000.0).round() as u32;
+        transit_samples.saturating_add(u32::try_from(local_samples).unwrap_or(u32::MAX))
     }
 
     fn sync_metronome(&mut self, speaker: &mut RxChannels, now: Instant) {
-        let delay = self
-            .metronome_state()
-            .map_or(0, |state| self.leader_phase_delay_samples(state.config));
+        let delay = self.metronome_state().map_or(0, |state| {
+            self.leader_phase_delay_samples(state.config, speaker)
+        });
         speaker
             .metronome
             .phase_delay_samples

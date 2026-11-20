@@ -347,7 +347,7 @@ fn stable_target_decay_trims_without_resetting_codec_history() {
         assert_continuous(&previous, &output);
         previous = output;
     }
-    assert_eq!(trims, 2);
+    assert_eq!(trims, 4);
     assert_eq!(buffer.target, buffer.nominal_target);
 }
 
@@ -501,15 +501,15 @@ fn backlog_is_bounded_by_sequence_span_including_wrap_and_holes() {
             .insert(initial.wrapping_add(offset), &frame, start)
             .unwrap();
         buffer.trim_backlog().unwrap();
-        assert!(buffer.buffered_ms() <= 15.0);
+        assert!(buffer.buffered_ms() <= 10.0);
     }
-    assert_eq!(buffer.next, initial.wrapping_add(54));
+    assert_eq!(buffer.next, initial.wrapping_add(56));
     assert!(
         buffer
             .slots
             .iter()
             .flatten()
-            .all(|(seq, _)| seq.wrapping_sub(buffer.next) < 6)
+            .all(|(seq, _)| seq.wrapping_sub(buffer.next) < 4)
     );
 }
 
@@ -788,7 +788,7 @@ fn backlog_trim_counts_only_skipped_frames_and_corruption_counts_plc() {
         peer.insert(sequence, &encode(&mut enc, 0.5), now).unwrap();
     }
     peer.trim_backlog().unwrap();
-    assert_eq!(peer.diagnostics.skipped_frames, 6);
+    assert_eq!(peer.diagnostics.skipped_frames, 8);
     assert_eq!(peer.diagnostics.plc_frames, 0);
     assert_eq!(peer.diagnostics.resyncs, 0);
     let mut corrupt = PeerJitterBuffer::new(0, now, 1).unwrap();
@@ -807,7 +807,7 @@ fn full_downstream_preserves_packets_deadlines_and_decoder_history() {
     let mut encoder = encoder().unwrap();
     let mut reference = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
     let mut packets = Vec::new();
-    for offset in 0..6 {
+    for offset in 0..5 {
         let frame = encode(&mut encoder, 0.5);
         buffer
             .insert(u32::MAX.wrapping_add(offset), &frame, start)
@@ -821,7 +821,7 @@ fn full_downstream_preserves_packets_deadlines_and_decoder_history() {
         0
     );
     assert_eq!(buffer.next, u32::MAX);
-    assert_eq!(buffer.buffered_ms(), 15.0);
+    assert_eq!(buffer.buffered_ms(), 12.5);
     assert_eq!(buffer.diagnostics.skipped_frames, 0);
     assert_eq!(buffer.diagnostics.plc_frames, 0);
     let next_deadline = ready + CHUNK_TIME * 3;
@@ -881,5 +881,32 @@ fn forward_skips_splice_from_last_emitted_sample_including_multiple_skips() {
                 .all(|pair| (pair[1] - pair[0]).abs() < 0.1)
         );
         assert!(buffer.splice_from.is_none());
+    }
+}
+
+#[test]
+fn adaptive_headroom_decays_every_quarter_second_without_crossing_cli_floor() {
+    for nominal in [1, 3, 8, 16] {
+        let now = Instant::now();
+        let mut buffer = PeerJitterBuffer::new(0, now, nominal).unwrap();
+        buffer.target = (nominal + 2).min(MAX_TARGET);
+        let initial = buffer.target;
+        let frame = encode(&mut encoder().unwrap(), 0.5);
+        buffer
+            .insert(0, &frame, now + Duration::from_millis(249))
+            .unwrap();
+        assert_eq!(buffer.target, initial);
+        buffer
+            .insert(1, &frame, now + Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(buffer.target, initial.saturating_sub(1).max(nominal));
+        buffer
+            .insert(2, &frame, now + Duration::from_millis(500))
+            .unwrap();
+        assert_eq!(buffer.target, nominal);
+        buffer
+            .insert(3, &frame, now + Duration::from_millis(750))
+            .unwrap();
+        assert_eq!(buffer.target, nominal);
     }
 }

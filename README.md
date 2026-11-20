@@ -398,20 +398,28 @@ interruzioni con questi flag; tale verifica hardware rimane manuale.
 
 In modalità UDP, il callback di output legge un array fisso di `MAX_PEERS` ring
 `rtrb` indicizzati con `peer_id - 1` e allocati prima dell'avvio degli stream.
-Con JAM-24, `mixer::channels(buffer_frames)` dimensiona ogni ring sul blocco hardware:
-la riserva è di 840 campioni (17,5 ms: 15 ms di scheduling più un chunk Opus).
+Con JAM-36, `mixer::channels(buffer_frames)` dimensiona ogni ring sul blocco hardware:
+la riserva è di 240 campioni (5 ms) sotto 128 frame; da 128 frame vale
+`max(240, callback_frames * 2 + 120)`.
 Il prefill richiede blocco + riserva; la capacità arrotonda questa soglia a chunk
-interi da 120 campioni e aggiunge un chunk. Il callback conserva anche la coda
+interi da 120 campioni, senza aggiungere un ulteriore chunk. Il callback conserva la coda
 che ha completato il prefill, senza tagliarla subito dopo lo startup.
 
 | Blocco hardware | Prefill minimo | Primo prefill a chunk interi | Capacità SPSC |
 | --- | --- | --- | --- |
-| 64 | 904 | 960 | 1080 |
-| 128 | 968 | 1080 | 1200 |
-| 256 | 1096 | 1200 | 1320 |
+| 64 | 304 | 360 | 360 |
+| 128 | 504 | 600 | 600 |
+| 256 | 888 | 960 | 960 |
 
-I valori sono campioni mono. Questa riserva aggiunge latenza software rispetto
-alla precedente riserva di 5 ms; dispositivo e jitter buffer di rete si sommano.
+I valori sono campioni mono, indipendenti dal numero di canali hardware.
+Il jitter buffer ammette un solo chunk oltre il target; dopo 250 ms senza pacchetti
+in ritardo riduce di un chunk il target adattivo, fino al valore CLI richiesto
+(3 chunk predefiniti). A 64 frame il budget stimato di ricezione è quindi al massimo
+15 ms in regime stabile; l'occupazione reale oscilla per la quantizzazione di chunk
+e callback. I test verificano anche la media reale entro 15 ms con jitter sotto 3 ms.
+La riserva fissa non copre stalli del worker da 15 ms: in quel caso sono attesi
+underflow, seguiti da refill e recupero senza aumentare permanentemente il buffering.
+I test a 64/128/256 frame distinguono questi stalli dalla cadenza normale 0,25–1,5 ms.
 La capacità limita la latenza anche con callback ferme: il worker trattiene i
 chunk nel jitter buffer invece di estrarli e perderli contro una SPSC piena.
 Il worker conserva un jitter buffer indipendente per peer e limita i campioni decodificati senza sommare i flussi. Il callback somma `sample * gain`
@@ -563,8 +571,8 @@ Il tooltip scompone la stima one-way in audio I/O locale (buffer di cattura
 richiesto più ultimo blocco di output osservato, con fallback al buffer richiesto),
 frame Opus da 2,5 ms più lookahead interrogato sull'encoder, RTT server / 2 e
 massimo audio codificato accodato tra peer più riserva SPSC del mixer.
-Il margine rispetto a 25 ms può essere negativo. Con l'attuale riserva di
-840 campioni (17,5 ms), anche una rete molto veloce lascia poco margine.
+Il margine rispetto a 25 ms può essere negativo. La riserva SPSC è di 5 ms a
+64 frame e cresce con il blocco di output osservato da 128 frame in su.
 
 È un budget stimato a 48 kHz: RTT server / 2 è un'approssimazione della rete,
 non una misura del percorso audio completo tra musicisti; la configurazione
@@ -888,15 +896,21 @@ beat visivo. Con E2E stimata oltre 25 ms e metronomo di stanza spento compare un
 suggerimento discreto per attivarlo o scegliere un Tempo Leader.
 
 Il clock assoluto e il Leader mantengono offset zero. Il Follower sottrae alla
-fase nominale un ritardo positivo in campioni: `RTT server / 2` + audio accodato nel
-`PeerJitterBuffer` del solo Leader + riserva SPSC del mixer (17,5 ms). La stima viene
+fase nominale un ritardo positivo in campioni: transito SFU completo stimato
+(`RTT locale / 2` per l'uplink del Leader + `RTT locale / 2` per il downlink),
+target adattivo stabile del `PeerJitterBuffer` del solo Leader, riserva SPSC scalata,
+frame Opus più lookahead (5 ms con l'encoder attuale) e audio I/O locale
+(cattura richiesta + ultimo blocco output osservato; 2,67 ms a 64 frame).
+Il target stabile evita che l'inserimento o il consumo di ogni pacchetto sposti il click.
+La stima viene
 aggiornata sul worker; il callback legge un atomico una volta per blocco, senza
 allocazioni, lock o syscall. Cambi di riferimento conservano l'ancora di stanza e
 lasciano terminare un click già iniziato. Se RTT o audio del Leader non sono ancora
-disponibili, le rispettive componenti valgono zero; resta la riserva SPSC.
+disponibili, le rispettive componenti valgono zero; restano riserva SPSC, codec e audio I/O.
 
 Il ritardo è una stima: il protocollo non misura l'uplink del Leader né l'hardware
-remoto. Non garantisce allineamento acustico esatto tra dispositivi; resta necessaria
+remoto: usa le misure locali come proxy per il Leader. Non garantisce allineamento
+acustico esatto tra dispositivi; resta necessaria
 una verifica in cuffia su hardware reale. I test coprono segno del ritardo, offset
 zero del Leader, selezione della sola coda interessata, cambi di riferimento,
 fase assoluta con epoche audio diverse, propagazione dei comandi fra due client

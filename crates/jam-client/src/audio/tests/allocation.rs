@@ -155,7 +155,7 @@ fn mixer_micro_underflow_fades_and_refill_do_not_allocate() {
     let (mut rx, mut mixer) = crate::mixer::channels(256);
     let stats = Stats::default();
     let mut output = [0.0_f32; 256];
-    let prefill = [0.5; 1200];
+    let prefill = [0.5; 888];
     assert!(rx.push(1, &prefill));
     mixer.playback(&mut output, 1, &stats);
     while mixer.rings[0].pop().is_ok() {}
