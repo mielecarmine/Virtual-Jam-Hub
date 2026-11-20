@@ -1005,6 +1005,8 @@ fn roster_tracks_silent_peers_and_resets_departed_controls() {
     network.peer_id = Some(1);
     let (speaker, _) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let peer = |id, name| jam_protocol::PeerInfo {
+        public_addr: "127.0.0.1:5000".parse().unwrap(),
+        local_addr: None,
         peer_id: id,
         nickname: [name; NICKNAME_CAPACITY],
         nickname_len: 1,

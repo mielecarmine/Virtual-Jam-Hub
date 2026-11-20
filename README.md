@@ -915,3 +915,29 @@ una verifica in cuffia su hardware reale. I test coprono segno del ritardo, offs
 zero del Leader, selezione della sola coda interessata, cambi di riferimento,
 fase assoluta con epoche audio diverse, propagazione dei comandi fra due client
 attraverso il server reale e zero allocazioni durante le variazioni di offset.
+
+
+### Signaling P2P ibrido — JAM-37
+
+`JoinRequest` include `local_addr: Option<SocketAddr>`. Il server pubblica in ogni
+`PeerInfo` l'endpoint UDP osservato (`public_addr`) e quello LAN dichiarato, se presente.
+Il record endpoint ha dimensione fissa di 27 byte: famiglia (0 assente, 4 IPv4, 6 IPv6),
+16 ottetti IP, porta `u16` little-endian, flowinfo IPv6 `u32` little-endian e scope ID
+IPv6 `u32` little-endian. I byte inutilizzati sono zero; gli ottetti IP mantengono
+l'ordine standard dell'indirizzo. Gli scope ID IPv6 sono locali all'host che li
+annuncia: un futuro client P2P deve scegliere la propria interfaccia locale.
+Un join occupa 63 byte e una lista di otto peer 708 byte, sempre sotto il limite MTU.
+
+`P2pProbe` (tipo `0x0a`) e `P2pAck` (`0x0b`) contengono ID mittente, ID destinatario
+e timestamp `u64` little-endian: 13 byte totali, destinati allo scambio diretto fra
+client. Il server li ignora senza rinnovare il watchdog.
+`DirectRouteUpdate` (`0x0c`, 4 byte totali) aggiorna la maschera della sola sessione
+identificata dall'endpoint sorgente: il bit `peer_id - 1` disabilita l'inoltro SFU
+verso quel destinatario. Le altre coppie continuano a usare il relay; una maschera
+zero ripristina tutti gli inoltri. Il server ignora bit per sé o per ID inattivi e
+ripulisce i bit dei peer usciti o scaduti prima del riutilizzo degli ID.
+
+Il layout di join e lista peer è incompatibile con le versioni precedenti:
+aggiornare insieme server e client. Il client attuale invia `local_addr: None`
+e continua a usare il relay; scoperta LAN, hole punching e fallback automatico
+sono previsti da JAM-38.

@@ -93,11 +93,7 @@ impl Server {
     fn handle(&mut self, packet: &[u8], source: SocketAddr, now: Instant) {
         if let Ok(header) = AudioHeader::from_bytes(packet) {
             if self.sessions.touch(source, header.peer_id, now) {
-                for destination in self
-                    .sessions
-                    .addresses()
-                    .filter(|address| *address != source)
-                {
+                for destination in self.sessions.relay_addresses(source) {
                     if let Err(error) = self.socket.send_to(packet, destination) {
                         eprintln!("UDP audio to {destination} failed: {error}");
                     }
@@ -113,8 +109,12 @@ impl Server {
             ControlMessage::JoinRequest {
                 nickname,
                 nickname_len,
+                local_addr,
             } => {
-                let Some(peer_id) = self.sessions.join(source, nickname, nickname_len, now) else {
+                let Some(peer_id) =
+                    self.sessions
+                        .join(source, nickname, nickname_len, now, local_addr)
+                else {
                     // The current protocol has no room-full rejection message.
                     return;
                 };
@@ -172,7 +172,13 @@ impl Server {
                     self.broadcast_metronome();
                 }
             }
-            ControlMessage::JoinAccepted { .. }
+            ControlMessage::DirectRouteUpdate { direct_peers_mask } => {
+                self.sessions
+                    .update_direct_routes(source, direct_peers_mask, now);
+            }
+            ControlMessage::P2pProbe { .. }
+            | ControlMessage::P2pAck { .. }
+            | ControlMessage::JoinAccepted { .. }
             | ControlMessage::PeerListUpdate { .. }
             | ControlMessage::Pong { .. }
             | ControlMessage::MetronomeState { .. } => {}
