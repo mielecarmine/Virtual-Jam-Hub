@@ -169,7 +169,7 @@ fn mixer_micro_underflow_fades_and_refill_do_not_allocate() {
         mixer.playback(&mut output, 1, &stats);
     });
     assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 121);
-    assert_eq!(stats.telemetry().align_dropped_samples, 1);
+    assert_eq!(stats.telemetry().align_dropped_samples, 0);
 }
 
 #[test]

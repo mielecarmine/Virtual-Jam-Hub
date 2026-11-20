@@ -55,6 +55,8 @@ pub struct PeerJitterBuffer {
     recovery_last: Option<u32>,
     recovery_count: u8,
     hold: bool,
+    batch_caught_up: bool,
+    splice_from: Option<f32>,
     last: Chunk,
     decoder: Decoder,
     pub last_received: Instant,
@@ -87,10 +89,23 @@ impl PeerJitterBuffer {
             recovery_last: None,
             recovery_count: 0,
             hold: false,
+            batch_caught_up: false,
+            splice_from: None,
             last: [0.0; FRAME_SAMPLES],
             decoder: Decoder::new(SAMPLE_RATE, Channels::Mono)?,
             last_received: now,
         })
+    }
+
+    /// Inspect only packets ready in this tick, relative to the pre-batch cursor.
+    pub fn begin_receive_batch(&mut self, sequences: impl Iterator<Item = u32>) {
+        self.batch_caught_up = sequences.into_iter().any(|sequence| {
+            sequence.wrapping_sub(self.next) < WINDOW || self.next.wrapping_sub(sequence) <= 1
+        });
+        if self.batch_caught_up {
+            self.recovery_count = 0;
+            self.recovery_last = None;
+        }
     }
 
     pub fn insert(&mut self, sequence: u32, chunk: &Encoded, now: Instant) -> opus::Result<()> {
@@ -103,7 +118,7 @@ impl PeerJitterBuffer {
                 self.next = sequence;
                 self.diagnostics.resyncs = self.diagnostics.resyncs.saturating_add(1);
             } else {
-                if self.recover_late(sequence, now)? {
+                if !self.batch_caught_up && self.recover_late(sequence, now)? {
                     self.slots[sequence as usize % CAPACITY] = Some((sequence, *chunk));
                     return Ok(());
                 }
@@ -111,6 +126,10 @@ impl PeerJitterBuffer {
                 if self.next.wrapping_sub(sequence) >= WINDOW {
                     self.diagnostics.late_dropped_far =
                         self.diagnostics.late_dropped_far.saturating_add(1);
+                }
+                // A caught-up burst is scheduling jitter, not a sustained late stream.
+                if self.batch_caught_up {
+                    return Ok(());
                 }
                 // Ignore duplicates/replays and require repeated recent lateness, rather
                 // than inflating headroom for every isolated late packet in a batch.
@@ -295,6 +314,8 @@ impl PeerJitterBuffer {
         if count == 0 {
             return Ok(());
         }
+        // Preserve the last emitted sample, not audio decoded only to advance history.
+        self.splice_from.get_or_insert(self.last[FRAME_SAMPLES - 1]);
         self.diagnostics.skipped_frames = self.diagnostics.skipped_frames.saturating_add(count);
         // Intentional trims and scheduling skips are not evidence of network lateness.
         self.last_late = Some(self.next.wrapping_add(count).wrapping_sub(1));
@@ -329,6 +350,14 @@ impl PeerJitterBuffer {
             self.sanitize_last();
         } else {
             self.decode_next()?;
+        }
+        if let Some(previous) = self.splice_from.take() {
+            const FADE: u16 = 48; // 1 ms at 48 kHz, entirely on the UDP worker.
+            let offset = previous - self.last[0];
+            for (sample, remaining) in self.last.iter_mut().zip((1..=FADE).rev()) {
+                *sample =
+                    (*sample + offset * f32::from(remaining) / f32::from(FADE)).clamp(-1.0, 1.0);
+            }
         }
         Ok(Some(self.last))
     }

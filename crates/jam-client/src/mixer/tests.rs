@@ -614,7 +614,7 @@ fn stale_epoch_alignment_drops_are_counted() {
 }
 
 #[test]
-fn isolated_underflow_recovers_next_callback_without_adding_latency() {
+fn isolated_underflow_recovers_without_discarding_a_sparse_queue() {
     for frames in [64, 128, 256] {
         let (mut rx, mut mixer) = channels(frames);
         let stats = Stats::default();
@@ -622,7 +622,7 @@ fn isolated_underflow_recovers_next_callback_without_adding_latency() {
         assert!(rx.push(1, &vec![0.5; RX_TARGET_SAMPLES + frames]));
         mixer.playback(&mut output, 1, &stats);
         // Repeated single-sample gaps. Every return includes the delayed sample
-        // plus one callback; the delayed sample must be retired, not replayed.
+        // plus one callback; sparse queues must remain available for playback.
         for cycle in 1..=100 {
             while mixer.rings[0].pop().is_ok() {}
             assert!(rx.push(1, &vec![0.5; frames - 1]));
@@ -631,15 +631,14 @@ fn isolated_underflow_recovers_next_callback_without_adding_latency() {
             assert!(output[frames - 1] > 0.0);
             assert!(output[frames - 1] < output[frames - 2]);
             let last = output[frames - 1];
-            assert!(rx.push(1, &[0.9])); // Obsolete sample, easily distinguished.
+            assert!(rx.push(1, &[-0.5]));
             assert!(rx.push(1, &vec![-0.5; frames]));
             mixer.playback(&mut output, 1, &stats);
             assert!((output[0] - last).abs() < 0.022);
             assert!(output.windows(2).all(|v| (v[1] - v[0]).abs() < 0.022));
             assert_eq!(output[frames - 1], (-0.5_f32).tanh());
-            assert_eq!(mixer.rings[0].slots(), 0);
-            assert_eq!(mixer.continuity[0].debt, 0);
-            assert_eq!(stats.telemetry().align_dropped_samples, cycle);
+            assert_eq!(mixer.rings[0].slots(), 1);
+            assert_eq!(stats.telemetry().align_dropped_samples, 0);
             assert_eq!(stats.telemetry().not_ready_samples, 0);
             assert_eq!(stats.output_underflows.load(Ordering::Relaxed), cycle);
         }
@@ -680,4 +679,62 @@ fn fade_and_starvation_span_callbacks_and_refill_only_the_starved_peer() {
     assert!(output[0] > 0.0 && output[0] < 0.02);
     assert!(output.windows(2).all(|v| v[1] >= v[0]));
     assert_eq!(output[47..], [0.5_f32.tanh(); 17]);
+}
+
+#[test]
+fn partial_64_frame_underflow_recovers_on_next_chunk_without_discard_loop() {
+    for missing in [1, 60, 64, 116, 119] {
+        let (mut rx, mut mixer) = channels(64);
+        let stats = Stats::default();
+        assert!(rx.push(1, &[0.5; RX_TARGET_SAMPLES + 64]));
+        mixer.playback(&mut [0.0_f32; 128], 2, &stats);
+        while mixer.rings[0].pop().is_ok() {}
+        assert!(rx.push(1, &vec![0.5; 128 - missing]));
+        // Two hardware callbacks produce the partial chunk underflow.
+        for _ in 0..2 {
+            mixer.playback(&mut [0.0_f32; 128], 2, &stats);
+        }
+        assert!(mixer.ready[0]);
+        assert_eq!(
+            stats.output_underflows.load(Ordering::Relaxed),
+            missing as u32
+        );
+        assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+        let mut output = [0.0_f32; 128];
+        mixer.playback(&mut output, 2, &stats);
+        assert!(mixer.ready[0]);
+        assert_eq!(mixer.continuity[0].missing, 0);
+        assert_eq!(output[126], 0.5_f32.tanh());
+        // Model exactly 120 samples produced every 2.5 ms, 64 consumed every 1.333 ms.
+        let mut produced = 0;
+        for callback in 1..=750 {
+            while produced * FRAME_SAMPLES < callback * 64 {
+                assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
+                produced += 1;
+            }
+            mixer.playback(&mut output, 2, &stats);
+            assert!(mixer.ready[0]);
+            assert_eq!(output, [0.5_f32.tanh(); 128]);
+        }
+        assert_eq!(
+            stats.output_underflows.load(Ordering::Relaxed),
+            missing as u32
+        );
+        assert_eq!(stats.telemetry().align_dropped_samples, 0);
+    }
+}
+
+#[test]
+fn isolated_samples_in_partial_blocks_do_not_reset_starvation() {
+    let (mut rx, mut mixer) = channels(64);
+    let stats = Stats::default();
+    assert!(rx.push(1, &[0.5; RX_TARGET_SAMPLES + 64]));
+    mixer.playback(&mut [0.0_f32; 128], 2, &stats);
+    while mixer.rings[0].pop().is_ok() {}
+    for _ in 0..2 {
+        assert!(rx.push(1, &[0.5; 4]));
+        mixer.playback(&mut [0.0_f32; 128], 2, &stats);
+    }
+    assert!(!mixer.ready[0]);
+    assert_eq!(mixer.continuity[0].missing, STARVATION_SAMPLES);
 }

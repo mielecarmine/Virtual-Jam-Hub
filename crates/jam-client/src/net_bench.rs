@@ -13,6 +13,8 @@ mod mixer;
 mod monitor;
 #[allow(dead_code)]
 mod network;
+#[allow(dead_code, unused_imports)]
+mod scheduling;
 
 use std::{
     fmt::Write as _,

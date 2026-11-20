@@ -233,6 +233,14 @@ impl Network {
         // Deliver in simulated arrival order even when several deadlines fall in one tick.
         self.delayed
             .sort_unstable_by_key(|packet| std::cmp::Reverse(packet.due));
+        for (&id, peer) in &mut self.peers {
+            peer.begin_receive_batch(
+                self.delayed
+                    .iter()
+                    .filter(|packet| packet.peer == id && packet.due <= now)
+                    .map(|packet| packet.sequence),
+            );
+        }
         while self.delayed.last().is_some_and(|packet| packet.due <= now) {
             let Some(packet) = self.delayed.pop() else {
                 break;
@@ -609,6 +617,14 @@ impl Network {
         mut speaker: RxChannels,
         stop: &AtomicBool,
     ) -> io::Result<()> {
+        // Keep the platform guard on the worker that owns its native registration.
+        let _priority = match crate::scheduling::udp_worker() {
+            Ok(priority) => Some(priority),
+            Err(error) => {
+                eprintln!("UDP worker scheduling: {error}");
+                None
+            }
+        };
         let result = (|| {
             while !stop.load(Ordering::Relaxed) {
                 self.tick(&mut mic, &mut speaker, Instant::now())?;

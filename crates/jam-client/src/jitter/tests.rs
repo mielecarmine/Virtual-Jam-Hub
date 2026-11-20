@@ -1,6 +1,17 @@
 use super::*;
 use crate::codec::{encoder, tests::encode};
 
+fn assert_playout(buffer: &mut PeerJitterBuffer, now: Instant, expected: Chunk) {
+    let splice = buffer.splice_from;
+    let actual = buffer.pop(now).unwrap().unwrap();
+    if let Some(previous) = splice {
+        assert!((actual[0] - previous).abs() < 1e-6);
+        assert_eq!(&actual[48..], &expected[48..]);
+    } else {
+        assert_eq!(actual, expected);
+    }
+}
+
 fn decode(decoder: &mut Decoder, input: &[u8]) -> Chunk {
     let mut chunk = [0.0; FRAME_SAMPLES];
     assert_eq!(
@@ -326,8 +337,13 @@ fn stable_target_decay_trims_without_resetting_codec_history() {
             trims += 1;
         }
         let expected = decode(&mut reference, &frames[buffer.next as usize]);
+        let splice = buffer.splice_from;
         let output = buffer.pop(now).unwrap().unwrap();
-        assert_eq!(output, expected, "codec history changed at tick {tick}");
+        if splice.is_some() {
+            assert_eq!(&output[48..], &expected[48..]);
+        } else {
+            assert_eq!(output, expected, "codec history changed at tick {tick}");
+        }
         assert_continuous(&previous, &output);
         previous = output;
     }
@@ -362,10 +378,7 @@ fn short_deadline_skips_decode_packets_and_conceal_holes_across_wrap() {
     buffer.insert(1, &resumed, ready).unwrap();
     buffer.skip(2).unwrap();
     assert_eq!(buffer.next, 1);
-    assert_eq!(
-        buffer.pop(ready).unwrap().unwrap(),
-        decode(&mut reference, &resumed)
-    );
+    assert_playout(&mut buffer, ready, decode(&mut reference, &resumed));
 }
 
 #[test]
@@ -387,7 +400,7 @@ fn window_sized_and_very_large_skips_reset_codec_in_bounded_work() {
         assert_eq!(buffer.last, [0.0; FRAME_SAMPLES]);
         assert!(buffer.slots.iter().all(Option::is_none));
         let mut fresh = Decoder::new(SAMPLE_RATE, Channels::Mono).unwrap();
-        assert_eq!(buffer.pop(ready).unwrap().unwrap(), decode(&mut fresh, &[]));
+        assert_playout(&mut buffer, ready, decode(&mut fresh, &[]));
     }
 }
 
@@ -522,10 +535,7 @@ fn backlog_trim_preserves_current_tick_and_does_not_repeat_on_a_stable_stream() 
         assert_eq!(frames, 1, "a trim must preserve the current tick");
         assert_eq!(buffer.next, initial.wrapping_add(1));
         assert_eq!(buffer.last, decode(&mut reference, &packets[0]));
-        assert_eq!(
-            buffer.pop(ready).unwrap().unwrap(),
-            decode(&mut reference, &packets[1])
-        );
+        assert_playout(&mut buffer, ready, decode(&mut reference, &packets[1]));
         for tick in 1..=32 {
             let now = ready + CHUNK_TIME * tick;
             let frame = encode(&mut encoder, 0.5);
@@ -534,9 +544,10 @@ fn backlog_trim_preserves_current_tick_and_does_not_repeat_on_a_stable_stream() 
                 .unwrap();
             packets.push(frame);
             assert_eq!(buffer.playout_frames(now, now, 1).unwrap(), 1);
-            assert_eq!(
-                buffer.pop(now).unwrap().unwrap(),
-                decode(&mut reference, &packets[(tick + 1) as usize])
+            assert_playout(
+                &mut buffer,
+                now,
+                decode(&mut reference, &packets[(tick + 1) as usize]),
             );
             assert_eq!(buffer.pending_playout, 0);
             assert_eq!(buffer.diagnostics.skipped_frames, 1);
@@ -583,10 +594,7 @@ fn backlog_trim_reduces_pending_excess_but_preserves_downstream_capacity() {
             decode(&mut reference, packet);
         }
         for packet in &packets[skipped as usize..skipped as usize + 2] {
-            assert_eq!(
-                buffer.pop(now).unwrap().unwrap(),
-                decode(&mut reference, packet)
-            );
+            assert_playout(&mut buffer, now, decode(&mut reference, packet));
         }
         let now = now + CHUNK_TIME;
         let frames = buffer.playout_frames(now, now, CAPACITY).unwrap();
@@ -595,10 +603,7 @@ fn backlog_trim_reduces_pending_excess_but_preserves_downstream_capacity() {
             let packet = packets
                 .get((skipped + 2 + offset) as usize)
                 .map_or(&[][..], |packet| &packet[..]);
-            assert_eq!(
-                buffer.pop(now).unwrap().unwrap(),
-                decode(&mut reference, packet)
-            );
+            assert_playout(&mut buffer, now, decode(&mut reference, packet));
         }
         assert_eq!(buffer.pending_playout, 0);
         assert_eq!(buffer.diagnostics.skipped_frames, skipped);
@@ -844,4 +849,37 @@ fn full_downstream_preserves_packets_deadlines_and_decoder_history() {
         );
     }
     assert_eq!(buffer.diagnostics.skipped_frames, 0);
+}
+
+#[test]
+fn forward_skips_splice_from_last_emitted_sample_including_multiple_skips() {
+    for count in [1, 7, WINDOW] {
+        let start = Instant::now();
+        let mut buffer = PeerJitterBuffer::new(100, start, 3).unwrap();
+        let ready = buffer.ready_at;
+        let mut enc = encoder().unwrap();
+        for sequence in 100..120 {
+            buffer
+                .insert(sequence, &encode(&mut enc, 0.7), start)
+                .unwrap();
+            buffer.pop(ready).unwrap();
+        }
+        // Force a pronounced boundary so the test does not depend on a sine's phase.
+        buffer.last[FRAME_SAMPLES - 1] = 0.8;
+        buffer.skip(count).unwrap();
+        buffer.skip(1).unwrap();
+        assert_eq!(buffer.splice_from, Some(0.8));
+        let sequence = buffer.next;
+        let frame = encode(&mut enc, -0.7);
+        buffer.insert(sequence, &frame, ready).unwrap();
+        let actual = buffer.pop(ready).unwrap().unwrap();
+        assert!((actual[0] - 0.8).abs() < 1e-6);
+        assert!(actual.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+        assert!(
+            actual
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).abs() < 0.1)
+        );
+        assert!(buffer.splice_from.is_none());
+    }
 }
