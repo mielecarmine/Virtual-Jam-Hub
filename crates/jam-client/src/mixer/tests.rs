@@ -17,7 +17,7 @@ fn metronome_is_added_before_clipping_and_remains_audible_during_channel_solo() 
     rx.sync_metronome(click_config(120, 4), 0);
     click_rx.sync_metronome(click_config(120, 4), 0);
     rx.controls[0].solo.store(true, Ordering::Relaxed);
-    assert!(rx.push(1, &[0.8; RX_TARGET_SAMPLES + 128]));
+    assert!(rx.push(1, &vec![0.8; rx_target_samples(128) + 128]));
     let mut output = [0.0_f32; 256];
     let mut click = [0.0_f32; 128];
     mixer.playback(&mut output, 2, &stats);
@@ -340,7 +340,7 @@ fn four_full_scale_peers_are_soft_clipped_and_duplicated_to_stereo() {
     let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
     for id in 1..=4 {
-        rx.push(id, &[0.8; RX_TARGET_SAMPLES + 128]);
+        rx.push(id, &vec![0.8; rx_target_samples(128) + 128]);
     }
     let mut output = [0.0; 256];
     mixer.playback(&mut output, 2, &stats);
@@ -352,7 +352,7 @@ fn four_full_scale_peers_are_soft_clipped_and_duplicated_to_stereo() {
     }
     mixer.playback(&mut output, 2, &stats);
     for id in 1..=4 {
-        rx.push(id, &[-0.8; RX_TARGET_SAMPLES + 128]);
+        rx.push(id, &vec![-0.8; rx_target_samples(128) + 128]);
     }
     mixer.playback(&mut output, 2, &stats);
     assert!(output.iter().all(|v| (*v + expected).abs() < 1e-6));
@@ -394,7 +394,7 @@ fn atomic_gain_mute_and_solo_take_effect_on_already_queued_audio() {
 fn muted_audio_is_consumed_and_peer_reuse_discards_queued_old_samples() {
     let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
-    rx.push(8, &[0.8; RX_TARGET_SAMPLES + 128]);
+    rx.push(8, &vec![0.8; rx_target_samples(128) + 128]);
     rx.controls[7].mute.store(true, Ordering::Relaxed);
     let mut out = [1.0; 64];
     for _ in 0..20 {
@@ -418,9 +418,9 @@ fn muted_audio_is_consumed_and_peer_reuse_discards_queued_old_samples() {
 fn full_peer_queue_does_not_block_another_and_invalid_output_is_silent() {
     let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
     let stats = Stats::default();
-    rx.push(1, &[0.8; RX_TARGET_SAMPLES + 128]);
+    rx.push(1, &vec![0.8; rx_target_samples(128) + 128]);
     rx.push(1, &[-0.8; 128]);
-    rx.push(2, &[-0.5; RX_TARGET_SAMPLES + 128]);
+    rx.push(2, &vec![-0.5; rx_target_samples(128) + 128]);
     let mut out = [1.0; 128];
     mixer.playback(&mut out, 3, &stats);
     assert_eq!(out, [0.0; 128]);
@@ -481,7 +481,7 @@ fn whole_chunks_reach_prefill_without_alignment_loss() {
     for frames in [64, 128, 256] {
         let (mut rx, mut mixer) = channels(frames);
         let stats = Stats::default();
-        let chunks = (frames + RX_TARGET_SAMPLES).div_ceil(FRAME_SAMPLES);
+        let chunks = (frames + rx_target_samples(frames)).div_ceil(FRAME_SAMPLES);
         for _ in 0..chunks {
             assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
         }
@@ -491,7 +491,7 @@ fn whole_chunks_reach_prefill_without_alignment_loss() {
         assert_eq!(mixer.rings[0].slots(), queued - frames);
         assert_eq!(stats.telemetry().align_dropped_samples, 0);
         assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 0);
-        assert!(rx.rings[0].buffer().capacity() >= frames + RX_TARGET_SAMPLES + FRAME_SAMPLES);
+        assert!(rx.rings[0].buffer().capacity() >= frames + rx_target_samples(frames));
     }
 }
 
@@ -501,16 +501,16 @@ fn remote_prefill_is_per_peer_and_restarts_after_starvation_or_reuse() {
     let stats = Stats::default();
     let mut out = [0.0; 128];
     assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
-    assert!(rx.push(2, &[0.25; 1080]));
+    assert!(rx.push(2, &[0.25; 600]));
     mixer.playback(&mut out, 1, &stats);
     assert!(!mixer.ready[0]);
     assert!(mixer.ready[1]);
     assert_eq!(out, [0.25_f32.tanh(); 128]);
     rx.remove(2);
-    assert!(rx.push(1, &[0.5; 960]));
+    assert!(rx.push(1, &[0.5; 480]));
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [0.5_f32.tanh(); 128]);
-    for _ in 0..9 {
+    for _ in 0..6 {
         mixer.playback(&mut out, 1, &stats);
     }
     assert!(!mixer.ready[0]);
@@ -520,7 +520,7 @@ fn remote_prefill_is_per_peer_and_restarts_after_starvation_or_reuse() {
     assert_eq!(out, [0.0; 128]);
     rx.remove(1);
     mixer.playback(&mut out, 1, &stats);
-    assert!(rx.push(1, &[-0.5; 1080]));
+    assert!(rx.push(1, &[-0.5; 600]));
     mixer.playback(&mut out, 1, &stats);
     assert_eq!(out, [(-0.5_f32).tanh(); 128]);
 }
@@ -556,7 +556,8 @@ fn opus_pushes_and_hardware_callbacks_do_not_underflow_with_worker_jitter() {
                         assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
                         produced += FRAME_SAMPLES;
                     }
-                    next_wake += [120, 240, 480, 720, 48][wake % 5];
+                    // Normal worker cadence: 0.25 to 1.5 ms. Long stalls are tested separately.
+                    next_wake += [12, 48, 72, 60, 24][wake % 5];
                     wake += 1;
                 }
             }
@@ -581,20 +582,20 @@ fn diagnostics_separate_active_prefill_silence_underflow_and_alignment_drops() {
     assert!(rx.push(1, &[0.5; FRAME_SAMPLES]));
     mixer.playback(&mut output, 2, &stats);
     assert_eq!(stats.telemetry().not_ready_samples, 128);
-    assert!(rx.push(1, &[0.5; 960]));
+    assert!(rx.push(1, &[0.5; 480]));
     mixer.playback(&mut output, 2, &stats);
     assert_eq!(stats.telemetry().align_dropped_samples, 0);
-    for _ in 0..8 {
+    for _ in 0..4 {
         mixer.playback(&mut output, 2, &stats);
     }
-    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 72);
+    assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 40);
     mixer.playback(&mut output, 2, &stats);
     assert_eq!(stats.output_underflows.load(Ordering::Relaxed), 120);
-    assert_eq!(stats.telemetry().not_ready_samples, 208);
+    assert_eq!(stats.telemetry().not_ready_samples, 176);
     let callbacks = stats.telemetry().output_callbacks;
     rx.remove(1);
     mixer.playback(&mut output, 2, &stats);
-    assert_eq!(stats.telemetry().not_ready_samples, 208);
+    assert_eq!(stats.telemetry().not_ready_samples, 176);
     assert_eq!(stats.telemetry().output_callbacks, callbacks + 1);
     assert_eq!(stats.telemetry().last_output_frames, 128);
 }
@@ -619,7 +620,7 @@ fn isolated_underflow_recovers_without_discarding_a_sparse_queue() {
         let (mut rx, mut mixer) = channels(frames);
         let stats = Stats::default();
         let mut output = vec![0.0_f32; frames];
-        assert!(rx.push(1, &vec![0.5; RX_TARGET_SAMPLES + frames]));
+        assert!(rx.push(1, &vec![0.5; rx_target_samples(frames) + frames]));
         mixer.playback(&mut output, 1, &stats);
         // Repeated single-sample gaps. Every return includes the delayed sample
         // plus one callback; sparse queues must remain available for playback.

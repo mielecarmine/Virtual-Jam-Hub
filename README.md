@@ -398,20 +398,28 @@ interruzioni con questi flag; tale verifica hardware rimane manuale.
 
 In modalità UDP, il callback di output legge un array fisso di `MAX_PEERS` ring
 `rtrb` indicizzati con `peer_id - 1` e allocati prima dell'avvio degli stream.
-Con JAM-24, `mixer::channels(buffer_frames)` dimensiona ogni ring sul blocco hardware:
-la riserva è di 840 campioni (17,5 ms: 15 ms di scheduling più un chunk Opus).
+Con JAM-36, `mixer::channels(buffer_frames)` dimensiona ogni ring sul blocco hardware:
+la riserva è di 240 campioni (5 ms) sotto 128 frame; da 128 frame vale
+`max(240, callback_frames * 2 + 120)`.
 Il prefill richiede blocco + riserva; la capacità arrotonda questa soglia a chunk
-interi da 120 campioni e aggiunge un chunk. Il callback conserva anche la coda
+interi da 120 campioni, senza aggiungere un ulteriore chunk. Il callback conserva la coda
 che ha completato il prefill, senza tagliarla subito dopo lo startup.
 
 | Blocco hardware | Prefill minimo | Primo prefill a chunk interi | Capacità SPSC |
 | --- | --- | --- | --- |
-| 64 | 904 | 960 | 1080 |
-| 128 | 968 | 1080 | 1200 |
-| 256 | 1096 | 1200 | 1320 |
+| 64 | 304 | 360 | 360 |
+| 128 | 504 | 600 | 600 |
+| 256 | 888 | 960 | 960 |
 
-I valori sono campioni mono. Questa riserva aggiunge latenza software rispetto
-alla precedente riserva di 5 ms; dispositivo e jitter buffer di rete si sommano.
+I valori sono campioni mono, indipendenti dal numero di canali hardware.
+Il jitter buffer ammette un solo chunk oltre il target; dopo 250 ms senza pacchetti
+in ritardo riduce di un chunk il target adattivo, fino al valore CLI richiesto
+(3 chunk predefiniti). A 64 frame il budget stimato di ricezione è quindi al massimo
+15 ms in regime stabile; l'occupazione reale oscilla per la quantizzazione di chunk
+e callback. I test verificano anche la media reale entro 15 ms con jitter sotto 3 ms.
+La riserva fissa non copre stalli del worker da 15 ms: in quel caso sono attesi
+underflow, seguiti da refill e recupero senza aumentare permanentemente il buffering.
+I test a 64/128/256 frame distinguono questi stalli dalla cadenza normale 0,25–1,5 ms.
 La capacità limita la latenza anche con callback ferme: il worker trattiene i
 chunk nel jitter buffer invece di estrarli e perderli contro una SPSC piena.
 Il worker conserva un jitter buffer indipendente per peer e limita i campioni decodificati senza sommare i flussi. Il callback somma `sample * gain`
@@ -561,12 +569,12 @@ La barra di stato mostra «Latenza E2E: ~X.X ms» con tre fasce: verde sotto
 20 ms, giallo da 20 a 25 ms inclusi, rosso oltre 25 ms (rischio tempo-drag).
 Il tooltip scompone la stima one-way in audio I/O locale (buffer di cattura
 richiesto più ultimo blocco di output osservato, con fallback al buffer richiesto),
-frame Opus da 2,5 ms più lookahead interrogato sull'encoder, RTT server / 2 e
+frame Opus da 2,5 ms più lookahead interrogato sull'encoder, RTT della rotta attiva / 2 e
 massimo audio codificato accodato tra peer più riserva SPSC del mixer.
-Il margine rispetto a 25 ms può essere negativo. Con l'attuale riserva di
-840 campioni (17,5 ms), anche una rete molto veloce lascia poco margine.
+Il margine rispetto a 25 ms può essere negativo. La riserva SPSC è di 5 ms a
+64 frame e cresce con il blocco di output osservato da 128 frame in su.
 
-È un budget stimato a 48 kHz: RTT server / 2 è un'approssimazione della rete,
+È un budget stimato a 48 kHz: RTT della rotta più lenta / 2 è un'approssimazione della rete,
 non una misura del percorso audio completo tra musicisti; la configurazione
 hardware remota e le latenze interne del driver non sono misurate. Senza RTT
 valido, anche dopo la scadenza della misura, totale, margine e classificazione
@@ -888,16 +896,89 @@ beat visivo. Con E2E stimata oltre 25 ms e metronomo di stanza spento compare un
 suggerimento discreto per attivarlo o scegliere un Tempo Leader.
 
 Il clock assoluto e il Leader mantengono offset zero. Il Follower sottrae alla
-fase nominale un ritardo positivo in campioni: `RTT server / 2` + audio accodato nel
-`PeerJitterBuffer` del solo Leader + riserva SPSC del mixer (17,5 ms). La stima viene
+fase nominale un ritardo positivo in campioni: transito SFU completo stimato
+(`RTT locale / 2` per l'uplink del Leader + `RTT locale / 2` per il downlink),
+target adattivo stabile del `PeerJitterBuffer` del solo Leader, riserva SPSC scalata,
+frame Opus più lookahead (5 ms con l'encoder attuale) e audio I/O locale
+(cattura richiesta + ultimo blocco output osservato; 2,67 ms a 64 frame).
+Il target stabile evita che l'inserimento o il consumo di ogni pacchetto sposti il click.
+La stima viene
 aggiornata sul worker; il callback legge un atomico una volta per blocco, senza
 allocazioni, lock o syscall. Cambi di riferimento conservano l'ancora di stanza e
 lasciano terminare un click già iniziato. Se RTT o audio del Leader non sono ancora
-disponibili, le rispettive componenti valgono zero; resta la riserva SPSC.
+disponibili, le rispettive componenti valgono zero; restano riserva SPSC, codec e audio I/O.
 
 Il ritardo è una stima: il protocollo non misura l'uplink del Leader né l'hardware
-remoto. Non garantisce allineamento acustico esatto tra dispositivi; resta necessaria
+remoto: usa le misure locali come proxy per il Leader. Non garantisce allineamento
+acustico esatto tra dispositivi; resta necessaria
 una verifica in cuffia su hardware reale. I test coprono segno del ritardo, offset
 zero del Leader, selezione della sola coda interessata, cambi di riferimento,
 fase assoluta con epoche audio diverse, propagazione dei comandi fra due client
 attraverso il server reale e zero allocazioni durante le variazioni di offset.
+
+
+### Signaling P2P ibrido — JAM-37
+
+`JoinRequest` include `local_addr: Option<SocketAddr>`. Il server pubblica in ogni
+`PeerInfo` l'endpoint UDP osservato (`public_addr`) e quello LAN dichiarato, se presente.
+Il record endpoint ha dimensione fissa di 27 byte: famiglia (0 assente, 4 IPv4, 6 IPv6),
+16 ottetti IP, porta `u16` little-endian, flowinfo IPv6 `u32` little-endian e scope ID
+IPv6 `u32` little-endian. I byte inutilizzati sono zero; gli ottetti IP mantengono
+l'ordine standard dell'indirizzo. Gli scope ID IPv6 sono locali all'host che li
+annuncia: un futuro client P2P deve scegliere la propria interfaccia locale.
+Un join occupa 63 byte e una lista di otto peer 708 byte, sempre sotto il limite MTU.
+
+`P2pProbe` (tipo `0x0a`) e `P2pAck` (`0x0b`) contengono ID mittente, ID destinatario
+e timestamp `u64` little-endian: 13 byte totali, destinati allo scambio diretto fra
+client. Il server li ignora senza rinnovare il watchdog.
+`DirectRouteUpdate` (`0x0c`, 4 byte totali) aggiorna la maschera della sola sessione
+identificata dall'endpoint sorgente: il bit `peer_id - 1` disabilita l'inoltro SFU
+verso quel destinatario. Le altre coppie continuano a usare il relay; una maschera
+zero ripristina tutti gli inoltri. Il server ignora bit per sé o per ID inattivi e
+ripulisce i bit dei peer usciti o scaduti prima del riutilizzo degli ID.
+
+Il layout di join e lista peer è incompatibile con le versioni precedenti:
+aggiornare insieme server e client.
+
+### Motore P2P e fallback — JAM-38
+
+Il client usa un unico socket UDP non connesso per SFU e peer, con `send_to` /
+`recv_from`. L'interfaccia viene scelta con una query di routing locale su un socket
+temporaneo che non invia datagrammi; `--bind-ip` mantiene la selezione esplicita.
+La porta del socket dati è quella pubblicata nel join e riutilizzata dal NAT.
+Il join comunica l'endpoint LAN; gli endpoint LAN dei peer vengono provati soltanto
+quando il roster indica lo stesso IP pubblico. Gli scope IPv6 remoti non vengono
+riutilizzati come indici di interfaccia locali.
+
+Ogni peer parte in `Relayed`: audio via SFU e probe non bloccanti ogni 200 ms.
+Solo gli endpoint del roster possono inviare probe, ACK o audio; la ricerca della
+sorgente usa una hash map e l'ID dichiarato deve coincidere. Solo il server può
+modificare roster, clock e metronomo. Un ACK deve corrispondere a ID, destinatario,
+endpoint e probe pendente entro 600 ms. Il primo candidato confermato vince.
+L'audio va a ciascuna rotta `Direct` e una sola copia raggiunge SFU se resta almeno
+un destinatario `Relayed`. Prima del primo roster, il relay resta disponibile.
+
+Le notifiche `DirectRouteUpdate` precedono l'invio audio nello stesso tick e vengono
+ripetute ogni 200 ms per tollerare la perdita dei datagrammi di controllo. Se non
+arrivano audio diretto o ACK validi per **oltre 600 ms**, il tick ripristina il relay
+senza rifare join né ricreare encoder, decoder o jitter buffer. Dopo un fallback
+attende 2 s prima di riprovare. Il timeout evita la caduta della sessione; i frame
+persi durante un'interruzione di rete restano soggetti alla normale concealment Opus.
+
+Nelle stanze da **5 a 8 musicisti**, il guard limita a **due** le rotte dirette per
+client, dando priorità al Tempo Leader e poi al minor RTT. Se il jitter diretto
+EWMA supera **8 ms**, la rotta degrada a SFU, anche per il Leader: la salute del
+link prevale sulla priorità. Il relay richiede sempre un solo flusso in upload.
+
+Il budget usa metà del RTT della rotta attiva più lenta: probe P2P per le rotte
+dirette, Ping/Pong SFU come proxy per quelle relayed. Il Tempo Leader usa metà del
+RTT diretto del solo Leader, oppure la precedente stima delle due tratte SFU.
+`Ping RTT` resta la misura verso il server; la GUI indica `P2P` / `SFU` per peer.
+I log aggiungono due colonne alle 27 precedenti: `direct_peers_mask` (bit
+`peer_id - 1`, uno per P2P) e `route_rtt_ms` (RTT della rotta audio più lenta).
+
+I test includono due client contro `jam-server` reale: handshake automatico,
+notifica della maschera, frame P2P unico, filtro della copia SFU e ripresa del relay
+nel tick a 650 ms senza nuova sessione. Test deterministici coprono soglia esatta
+600/601 ms, retry, endpoint LAN, riuso ID, guard da 2 a 8 musicisti e budget/fase
+Tempo Leader con RTT diretto.

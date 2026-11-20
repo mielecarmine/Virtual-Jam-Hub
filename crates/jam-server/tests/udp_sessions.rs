@@ -85,6 +85,7 @@ fn join(socket: &UdpSocket, name: &str) -> u8 {
     send(
         socket,
         &ControlMessage::JoinRequest {
+            local_addr: None,
             nickname,
             nickname_len: u8::try_from(name.len()).unwrap(),
         },
@@ -207,6 +208,7 @@ fn receive_timeout_keeps_poll_bounded_without_traffic() {
     send(
         &client,
         &ControlMessage::JoinRequest {
+            local_addr: None,
             nickname: [0; NICKNAME_CAPACITY],
             nickname_len: 0,
         },

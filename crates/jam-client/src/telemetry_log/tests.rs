@@ -36,9 +36,9 @@ fn latency_columns_and_summary_preserve_components_and_missing_rtt() {
         ("audio_io_ms", "5.000", "5.000"),
         ("codec_ms", "5.000", "5.000"),
         ("network_one_way_ms", "12.000", "N/A"),
-        ("rx_buffer_ms", "25.000", "25.000"),
-        ("total_one_way_ms", "47.000", "N/A"),
-        ("headroom_ms", "-22.000", "N/A"),
+        ("rx_buffer_ms", "12.500", "12.500"),
+        ("total_one_way_ms", "34.500", "N/A"),
+        ("headroom_ms", "-9.500", "N/A"),
         ("latency_class", "2.000", "N/A"),
     ] {
         let index = names.iter().position(|column| *column == name).unwrap();
@@ -175,6 +175,8 @@ fn extended_columns_preserve_units_peaks_counters_and_device_configuration() {
     let mut log = SessionLog::start(&path, &Preferences::default(), audio).unwrap();
     let metrics = Telemetry {
         latency: None,
+        route_rtt_ms: Some(4.0),
+        direct_peers_mask: 2,
         rtt_ms: Some(23.0),
         rtt_max_ms: Some(81.0),
         worker_max_gap_ms: 15.625,

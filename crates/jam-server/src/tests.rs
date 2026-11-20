@@ -13,6 +13,7 @@ fn handle(server: &mut Server, message: &ControlMessage, source: SocketAddr, now
 
 fn join() -> ControlMessage {
     ControlMessage::JoinRequest {
+        local_addr: None,
         nickname: [b'a'; NICKNAME_CAPACITY],
         nickname_len: 1,
     }
@@ -25,7 +26,13 @@ fn room_client(server: &mut Server, now: Instant) -> UdpSocket {
         .unwrap();
     server
         .sessions
-        .join(socket.local_addr().unwrap(), [0; NICKNAME_CAPACITY], 0, now)
+        .join(
+            socket.local_addr().unwrap(),
+            [0; NICKNAME_CAPACITY],
+            0,
+            now,
+            None,
+        )
         .unwrap();
     socket
 }
@@ -174,7 +181,8 @@ fn leader_departure_or_timeout_notifies_survivors_and_keeps_phase() {
                 leader.local_addr().unwrap(),
                 [0; NICKNAME_CAPACITY],
                 0,
-                start + SESSION_TIMEOUT
+                start + SESSION_TIMEOUT,
+                None
             ),
             Some(1)
         );
@@ -264,14 +272,23 @@ fn full_room_retries_and_lowest_free_id() {
     let now = Instant::now();
     for id in 1..=u8::try_from(MAX_PEERS).unwrap() {
         assert_eq!(
-            table.join(source(u16::from(id)), [b'a'; NICKNAME_CAPACITY], 1, now),
+            table.join(
+                source(u16::from(id)),
+                [b'a'; NICKNAME_CAPACITY],
+                1,
+                now,
+                None
+            ),
             Some(id)
         );
     }
-    assert_eq!(table.join(source(9), [0; NICKNAME_CAPACITY], 0, now), None);
+    assert_eq!(
+        table.join(source(9), [0; NICKNAME_CAPACITY], 0, now, None),
+        None
+    );
     // A retry from an existing endpoint remains idempotent, even in a full room.
     assert_eq!(
-        table.join(source(2), [b'b'; NICKNAME_CAPACITY], 2, now),
+        table.join(source(2), [b'b'; NICKNAME_CAPACITY], 2, now, None),
         Some(2)
     );
     assert_eq!(table.peers().len(), MAX_PEERS);
@@ -279,7 +296,7 @@ fn full_room_retries_and_lowest_free_id() {
     assert!(!table.remove(source(2), 3));
     assert!(table.remove(source(2), 2));
     assert_eq!(
-        table.join(source(9), [0; NICKNAME_CAPACITY], 0, now),
+        table.join(source(9), [0; NICKNAME_CAPACITY], 0, now, None),
         Some(2)
     );
 }
@@ -288,8 +305,8 @@ fn full_room_retries_and_lowest_free_id() {
 fn timeout_boundary_and_authenticated_activity() {
     let mut table = SessionTable::default();
     let now = Instant::now();
-    table.join(source(1), [0; NICKNAME_CAPACITY], 0, now);
-    table.join(source(2), [0; NICKNAME_CAPACITY], 0, now);
+    table.join(source(1), [0; NICKNAME_CAPACITY], 0, now, None);
+    table.join(source(2), [0; NICKNAME_CAPACITY], 0, now, None);
     assert!(!table.expire(now + SESSION_TIMEOUT));
     table.touch(source(1), 2, now + SESSION_TIMEOUT); // Wrong peer ID.
     table.touch(source(3), 1, now + SESSION_TIMEOUT); // Unknown address.
@@ -357,7 +374,7 @@ fn only_valid_client_packets_refresh_sessions() {
 fn opaque_nickname_bytes_are_preserved() {
     let mut table = SessionTable::default();
     let nickname = [0xff; NICKNAME_CAPACITY];
-    table.join(source(1), nickname, 3, Instant::now());
+    table.join(source(1), nickname, 3, Instant::now(), None);
     let peer = table.peers()[0];
     assert_eq!(peer.nickname, nickname);
     assert_eq!(peer.nickname_len, 3);
@@ -373,6 +390,7 @@ fn watchdog_expires_sessions_even_without_incoming_packets() {
         Instant::now()
             .checked_sub(SESSION_TIMEOUT + Duration::from_millis(1))
             .unwrap(),
+        None,
     );
     server.poll().unwrap();
     assert_eq!(server.sessions.peers(), Vec::new());
@@ -405,15 +423,20 @@ fn expired_peer_cannot_send_or_receive_audio() {
         .unwrap();
     expired.set_nonblocking(true).unwrap();
     let now = Instant::now();
-    server
-        .sessions
-        .join(active.local_addr().unwrap(), [0; NICKNAME_CAPACITY], 0, now);
+    server.sessions.join(
+        active.local_addr().unwrap(),
+        [0; NICKNAME_CAPACITY],
+        0,
+        now,
+        None,
+    );
     server.sessions.join(
         expired.local_addr().unwrap(),
         [0; NICKNAME_CAPACITY],
         0,
         now.checked_sub(SESSION_TIMEOUT + Duration::from_secs(1))
             .unwrap(),
+        None,
     );
     let mut packet = [0; 120];
     AudioHeader::new(2, jam_protocol::STREAM_PRIMARY, 0, 0)
@@ -440,4 +463,208 @@ fn expired_peer_cannot_send_or_receive_audio() {
             io::ErrorKind::WouldBlock
         );
     }
+}
+
+#[test]
+fn peer_list_broadcasts_observed_public_and_optional_lan_endpoints() {
+    let mut server = Server::bind("127.0.0.1:0").unwrap();
+    let now = server.started;
+    let alice = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let bob = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for client in [&alice, &bob] {
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+    }
+    let local_addr = Some("192.168.1.2:5000".parse().unwrap());
+    handle(
+        &mut server,
+        &ControlMessage::JoinRequest {
+            nickname: [b'a'; NICKNAME_CAPACITY],
+            nickname_len: 1,
+            local_addr,
+        },
+        alice.local_addr().unwrap(),
+        now,
+    );
+    let _ = receive_control(&alice);
+    let _ = receive_control(&alice);
+    let _ = receive_control(&alice);
+    handle(&mut server, &join(), bob.local_addr().unwrap(), now);
+    let _ = receive_control(&bob);
+    let expected = server.sessions.peers();
+    assert_eq!(expected[0].public_addr, alice.local_addr().unwrap());
+    assert_eq!(expected[0].local_addr, local_addr);
+    assert_eq!(expected[1].public_addr, bob.local_addr().unwrap());
+    assert_eq!(expected[1].local_addr, None);
+    for client in [&alice, &bob] {
+        assert_eq!(
+            receive_control(client),
+            ControlMessage::PeerListUpdate {
+                peers: expected.clone()
+            }
+        );
+    }
+}
+
+#[test]
+fn direct_route_filters_only_sender_selected_peer_and_zero_restores_relay() {
+    let mut server = Server::bind("127.0.0.1:0").unwrap();
+    let now = server.started;
+    let alice = room_client(&mut server, now);
+    let bob = room_client(&mut server, now);
+    let carol = room_client(&mut server, now);
+    let outsider = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let a = alice.local_addr().unwrap();
+    let b = bob.local_addr().unwrap();
+    let c = carol.local_addr().unwrap();
+    handle(
+        &mut server,
+        &ControlMessage::DirectRouteUpdate {
+            direct_peers_mask: 2,
+        },
+        a,
+        now,
+    );
+    // An unknown source cannot change a member's route state.
+    handle(
+        &mut server,
+        &ControlMessage::DirectRouteUpdate {
+            direct_peers_mask: 255,
+        },
+        outsider.local_addr().unwrap(),
+        now,
+    );
+    let mut packet = [0; 120];
+    AudioHeader::new(1, jam_protocol::STREAM_PRIMARY, 0, 0)
+        .to_bytes(&mut packet)
+        .unwrap();
+    server.handle(&packet, a, now);
+    let mut bytes = [0; MAX_PACKET_SIZE];
+    assert_eq!(carol.recv(&mut bytes).unwrap(), packet.len());
+    assert_eq!(&bytes[..packet.len()], &packet);
+    for socket in [&alice, &bob] {
+        socket.set_nonblocking(true).unwrap();
+        assert_eq!(
+            socket.recv(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        socket.set_nonblocking(false).unwrap();
+    }
+    // Reverse direction remains relayed: A's update never changes B's mask.
+    AudioHeader::new(2, jam_protocol::STREAM_PRIMARY, 0, 0)
+        .to_bytes(&mut packet)
+        .unwrap();
+    server.handle(&packet, b, now);
+    assert_eq!(alice.recv(&mut bytes).unwrap(), packet.len());
+    assert_eq!(carol.recv(&mut bytes).unwrap(), packet.len());
+    handle(
+        &mut server,
+        &ControlMessage::DirectRouteUpdate {
+            direct_peers_mask: 0,
+        },
+        a,
+        now,
+    );
+    let mut destinations: Vec<_> = server.sessions.relay_addresses(a).collect();
+    destinations.sort_unstable();
+    let mut expected = vec![b, c];
+    expected.sort_unstable();
+    assert_eq!(destinations, expected);
+    AudioHeader::new(1, jam_protocol::STREAM_PRIMARY, 1, 0)
+        .to_bytes(&mut packet)
+        .unwrap();
+    server.handle(&packet, a, now);
+    assert_eq!(bob.recv(&mut bytes).unwrap(), packet.len());
+    assert_eq!(carol.recv(&mut bytes).unwrap(), packet.len());
+}
+
+#[test]
+fn departed_or_expired_peer_bits_are_cleared_before_id_reuse() {
+    for timeout in [false, true] {
+        let mut table = SessionTable::default();
+        let now = Instant::now();
+        for id in 1..=8 {
+            table.join(source(id), [0; NICKNAME_CAPACITY], 0, now, None);
+        }
+        for id in 1..=8 {
+            table.update_direct_routes(source(id), 255, now);
+        }
+        if timeout {
+            for id in 1..=7 {
+                table.touch_source(source(id), now + SESSION_TIMEOUT);
+            }
+            assert!(table.expire(now + SESSION_TIMEOUT + Duration::from_nanos(1)));
+        } else {
+            assert!(table.remove(source(8), 8));
+        }
+        assert_eq!(
+            table.join(
+                source(9),
+                [0; NICKNAME_CAPACITY],
+                0,
+                now + SESSION_TIMEOUT,
+                None
+            ),
+            Some(8)
+        );
+        for id in 1..=7 {
+            assert_eq!(
+                table.relay_addresses(source(id)).collect::<Vec<_>>(),
+                vec![source(9)]
+            );
+        }
+        assert_eq!(table.relay_addresses(source(9)).count(), 7);
+        // Bits for inactive IDs cannot suppress a peer that joins later.
+        assert!(table.remove(source(7), 7));
+        table.update_direct_routes(source(1), 255, now + SESSION_TIMEOUT);
+        assert_eq!(
+            table.join(
+                source(10),
+                [0; NICKNAME_CAPACITY],
+                0,
+                now + SESSION_TIMEOUT,
+                None
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            table.relay_addresses(source(1)).collect::<Vec<_>>(),
+            vec![source(10)]
+        );
+    }
+}
+
+#[test]
+fn direct_route_update_refreshes_member_but_p2p_packets_do_not() {
+    let mut server = Server::bind("127.0.0.1:0").unwrap();
+    let now = server.started;
+    let alice = room_client(&mut server, now);
+    let bob = room_client(&mut server, now);
+    let later = now + SESSION_TIMEOUT;
+    handle(
+        &mut server,
+        &ControlMessage::DirectRouteUpdate {
+            direct_peers_mask: 2,
+        },
+        alice.local_addr().unwrap(),
+        later,
+    );
+    for message in [
+        ControlMessage::P2pProbe {
+            sender_peer_id: 2,
+            target_peer_id: 1,
+            client_timestamp_us: 0,
+        },
+        ControlMessage::P2pAck {
+            sender_peer_id: 2,
+            target_peer_id: 1,
+            echo_timestamp_us: 0,
+        },
+    ] {
+        handle(&mut server, &message, bob.local_addr().unwrap(), later);
+    }
+    assert!(server.sessions.expire(later + Duration::from_nanos(1)));
+    assert_eq!(server.sessions.peers().len(), 1);
+    assert_eq!(server.sessions.peers()[0].peer_id, 1);
 }

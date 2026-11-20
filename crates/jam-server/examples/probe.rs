@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let response = exchange(
         &socket,
         &ControlMessage::JoinRequest {
+            local_addr: None,
             nickname,
             nickname_len: 9,
         },

@@ -1,7 +1,7 @@
 //! Deterministic desktop estimate, evaluated outside the CPAL callbacks.
 use jam_protocol::SAMPLE_RATE;
 
-use crate::{codec::FRAME_SAMPLES, mixer::RX_TARGET_SAMPLES};
+use crate::{codec::FRAME_SAMPLES, mixer::rx_target_samples};
 
 const OPTIMAL_MS: f64 = 20.0;
 const LIMIT_MS: f64 = 25.0;
@@ -47,7 +47,8 @@ pub struct LatencyBudget {
 impl LatencyBudget {
     /// Capture uses the requested block; playback uses the observed driver block,
     /// falling back to the requested block before the first output callback.
-    /// RTT is the server round-trip proxy, not a measured peer-to-peer audio path.
+    /// RTT is the slowest active audio route: matched P2P probe RTT when direct,
+    /// otherwise the SFU server round-trip proxy. It excludes remote audio hardware.
     pub fn estimate(
         buffer_frames: u32,
         last_output_frames: u32,
@@ -66,7 +67,7 @@ impl LatencyBudget {
         #[allow(clippy::cast_precision_loss)]
         let codec_ms = (FRAME_SAMPLES as f64 + f64::from(lookahead_samples)) * sample_ms;
         #[allow(clippy::cast_precision_loss)]
-        let rx_buffer_ms = buffer_ms + RX_TARGET_SAMPLES as f64 * sample_ms;
+        let rx_buffer_ms = buffer_ms + rx_target_samples(output_frames as usize) as f64 * sample_ms;
         let network_one_way_ms = rtt_ms
             .filter(|ms| ms.is_finite() && *ms >= 0.0)
             .map(|ms| ms / 2.0);
@@ -94,21 +95,21 @@ mod tests {
         assert!((budget.audio_io_ms - 20.0 / 3.0).abs() < 1e-10);
         assert_eq!(budget.codec_ms, 5.0);
         assert_eq!(budget.network_one_way_ms, Some(12.0));
-        assert_eq!(budget.rx_buffer_ms, 25.0);
+        assert!((budget.rx_buffer_ms - (7.5 + 632.0 / 48.0)).abs() < 1e-10);
         let total = budget.total_one_way_ms.unwrap();
-        assert!((total - (20.0 / 3.0 + 5.0 + 12.0 + 25.0)).abs() < 1e-10);
+        assert!((total - (20.0 / 3.0 + 5.0 + 12.0 + budget.rx_buffer_ms)).abs() < 1e-10);
         assert_eq!(budget.headroom_ms, Some(25.0 - total));
         assert!(budget.headroom_ms.unwrap() < 0.0);
     }
 
     #[test]
     fn classification_includes_both_limit_boundaries() {
-        // Zero hardware frames and lookahead isolate 2.5 ms codec + 17.5 ms reserve.
+        // Zero hardware frames and lookahead isolate 2.5 ms codec + 5 ms reserve.
         for (rtt, class) in [
-            (0.0, LatencyClass::Limit),
-            (9.999, LatencyClass::Limit),
-            (10.0, LatencyClass::Limit),
-            (10.001, LatencyClass::TempoDrag),
+            (0.0, LatencyClass::Optimal),
+            (24.999, LatencyClass::Optimal),
+            (25.0, LatencyClass::Limit),
+            (35.001, LatencyClass::TempoDrag),
         ] {
             assert_eq!(
                 LatencyBudget::estimate(0, 0, 0, Some(rtt), 0.0).class,
@@ -132,7 +133,7 @@ mod tests {
             let budget = LatencyBudget::estimate(128, 0, 120, rtt, 5.0);
             assert!((budget.audio_io_ms - 16.0 / 3.0).abs() < 1e-10);
             assert_eq!(budget.codec_ms, 5.0);
-            assert_eq!(budget.rx_buffer_ms, 22.5);
+            assert!((budget.rx_buffer_ms - (5.0 + 376.0 / 48.0)).abs() < 1e-10);
             assert_eq!(budget.network_one_way_ms, None);
             assert_eq!(budget.total_one_way_ms, None);
             assert_eq!(budget.headroom_ms, None);

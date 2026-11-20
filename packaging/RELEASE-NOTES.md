@@ -1,11 +1,11 @@
-Pre-release del client Virtual Jam `1.0.4-beta`, preparata da `develop`.
+Pre-release del client Virtual Jam `1.0.5-beta`, preparata da `develop`.
 
 ## Download e installazione
 
 | Sistema | Installer | Requisiti |
 | --- | --- | --- |
-| Windows | `Virtual-Jam-1.0.4-beta-windows-x64-setup.exe` | Windows 10/11 x64; installazione per utente, senza amministratore |
-| macOS Apple Silicon | `Virtual-Jam-1.0.4-beta-macos-arm64.pkg` | macOS 11 o successivo |
+| Windows | `Virtual-Jam-1.0.5-beta-windows-x64-setup.exe` | Windows 10/11 x64; installazione per utente, senza amministratore |
+| macOS Apple Silicon | `Virtual-Jam-1.0.5-beta-macos-arm64.pkg` | macOS 11 o successivo |
 
 macOS: aprire il pacchetto e avviare **Virtual Jam** da Applicazioni; consentire l'accesso al microfono.
 Windows: eseguire il setup e avviare **Virtual Jam** dal menu Start.
@@ -13,7 +13,16 @@ Windows: eseguire il setup e avviare **Virtual Jam** dal menu Start.
 
 Gli installer di questa beta non hanno una firma commerciale Windows/Apple né notarizzazione Apple. SmartScreen o Gatekeeper possono richiedere un'autorizzazione esplicita nelle impostazioni di sicurezza. La firma ad hoc del bundle macOS non certifica l'identità dell'autore.
 
-## Novità rispetto a 1.0.3-beta
+## Novità rispetto a 1.0.4-beta
+
+- Migliorata la continuità audio durante le raffiche UDP e ridotta la starvation del mixer (JAM-35).
+- Ridotti i buffer locali di ricezione e stabilizzata la sincronizzazione del Tempo Leader (JAM-36).
+- Aggiunti signaling P2P ibrido e inoltro selettivo del server SFU (JAM-37).
+- Aggiunte rotte audio UDP dirette tra peer, con fallback automatico sul server SFU e indicazione della rotta nella GUI (JAM-38).
+
+Client e server devono essere aggiornati insieme alla `1.0.5-beta`: il signaling introduce nuovi messaggi binari e richiede un server compatibile.
+
+## Novità della 1.0.4-beta
 
 - Migliorata la continuità della riproduzione durante lo smaltimento degli arretrati e il recupero da micro-interruzioni (JAM-28, JAM-30).
 - Isolato l'I/O della telemetria e migliorata la priorità del controller audio (JAM-29).

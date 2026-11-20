@@ -468,7 +468,7 @@ fn click_monitoring(
     let delay_ms = f64::from(controls.phase_delay_samples.load(Ordering::Relaxed)) * 1000.0
         / f64::from(jam_protocol::SAMPLE_RATE);
     ui.small(format!("Ritardo click Tempo Leader: ~{delay_ms:.1} ms")).on_hover_text(
-        "Stima: RTT server / 2 + coda jitter del solo Leader + riserva SPSC del mixer. Il protocollo non misura l’uplink e l’hardware del Leader.",
+        "Stima: RTT P2P / 2 oppure RTT SFU completo + target jitter del Leader + riserva SPSC + codec + audio I/O locale. Hardware remoto stimato con quello locale.",
     );
 }
 
@@ -507,6 +507,12 @@ impl eframe::App for AppState {
                 let rtt = self.telemetry.rtt_ms.map_or_else(|| "—".into(), |ms| format!("{ms:.1}"));
                 ui.label(format!("Ping RTT: {rtt} ms"));
                 if self.phase == Phase::Connected {
+                    if let Some(mixer) = &self.mixer {
+                        for peer in &mixer.peers {
+                            let route = if self.telemetry.direct_peers_mask & (1 << (peer.peer_id - 1)) != 0 { "P2P" } else { "SFU" };
+                            ui.label(format!("Peer {}: {route}", peer.peer_id));
+                        }
+                    }
                     ui.label(format!("Jitter: {:.1} ms · Packet Loss: {:.1}% · Jitter Buffer: {:.1} ms",
                         self.telemetry.jitter_ms, self.telemetry.loss_percent, self.telemetry.buffer_ms))
                         .on_hover_text("Ricezione: jitter massimo tra peer; perdita cumulativa dopo una finestra di riordino di 64 pacchetti; buffer = massimo audio codificato attualmente in coda, esclusi buffer hardware e SPSC.");
@@ -585,7 +591,7 @@ fn latency_indicator(ui: &mut egui::Ui, budget: Option<crate::network::telemetry
         ui.label(format!("Codec: {:.1} ms (frame Opus + lookahead encoder)", budget.codec_ms));
         ui.label(budget.network_one_way_ms.map_or_else(
             || "Rete: — (RTT non disponibile)".into(),
-            |ms| format!("Rete: {ms:.1} ms (RTT server / 2)"),
+            |ms| format!("Rete: {ms:.1} ms (RTT rotta / 2)"),
         ));
         ui.label(format!("Jitter/RX Buffer: {:.1} ms (massimo tra peer + riserva SPSC mixer)", budget.rx_buffer_ms));
         ui.label(budget.headroom_ms.map_or_else(
@@ -593,7 +599,7 @@ fn latency_indicator(ui: &mut egui::Ui, budget: Option<crate::network::telemetry
             |ms| format!("Margine residuo rispetto a 25 ms: {ms:+.1} ms"),
         ));
         ui.label("Ottimale <20 ms · Limite 20–25 ms · Rischio Tempo-Drag >25 ms");
-        ui.label("Stima one-way con audio I/O locale e RTT server: non misura il percorso audio completo tra due musicisti né l'hardware remoto.");
+        ui.label("Stima one-way con audio I/O locale e rotta più lenta (P2P/SFU): l'hardware remoto non è misurato.");
         if budget.class == Some(LatencyClass::TempoDrag) {
             ui.label("Consigliato un metronomo sincronizzato o un Tempo Leader come riferimento ritmico condiviso.");
         }
@@ -623,7 +629,7 @@ mod tests {
     fn tempo_drag_suggestion_requires_known_latency_above_25_and_room_click_off() {
         use crate::network::telemetry::LatencyBudget;
         assert!(!tempo_drag_hint(None, false));
-        for (rtt, expected) in [(10.0, false), (10.002, true)] {
+        for (rtt, expected) in [(35.0, false), (35.002, true)] {
             let budget = Some(LatencyBudget::estimate(0, 0, 0, Some(rtt), 0.0));
             assert_eq!(tempo_drag_hint(budget, false), expected);
             assert!(!tempo_drag_hint(budget, true));

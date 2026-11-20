@@ -265,7 +265,7 @@ impl ActiveSession for Session {
                 self.buffer_frames,
                 metrics.audio.last_output_frames,
                 self.network.codec_lookahead_samples,
-                metrics.rtt_ms,
+                metrics.route_rtt_ms,
                 metrics.buffer_ms,
             ));
             metrics

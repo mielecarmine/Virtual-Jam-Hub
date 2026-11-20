@@ -28,10 +28,11 @@ fn tempo_leader_uses_only_leaders_queue_and_tracks_reference_changes() {
     network.metronome = Some(state);
     let (mut rx, _) = crate::mixer::channels(128);
     network.sync_metronome(&mut rx, network.started);
-    // 12 ms transit + 7.5 ms leader jitter + 17.5 ms SPSC, excluding peer 3's 30 ms.
+    // Both SFU legs (24 ms), stable leader target (7.5 ms), Opus (5 ms),
+    // hardware (256 samples), and scaled SPSC (376 samples).
     assert_eq!(
         rx.metronome.phase_delay_samples.load(Ordering::Relaxed),
-        1776
+        2384
     );
     network
         .peers
@@ -42,7 +43,7 @@ fn tempo_leader_uses_only_leaders_queue_and_tracks_reference_changes() {
     network.sync_metronome(&mut rx, network.started);
     assert_eq!(
         rx.metronome.phase_delay_samples.load(Ordering::Relaxed),
-        1656
+        2384
     );
     // Local leader and absolute clock must always have zero offset, with the same anchor.
     for leader in [1, 0] {
@@ -56,7 +57,7 @@ fn tempo_leader_uses_only_leaders_queue_and_tracks_reference_changes() {
     network.sync_metronome(&mut rx, network.started);
     assert_eq!(
         rx.metronome.phase_delay_samples.load(Ordering::Relaxed),
-        840
+        872
     );
 }
 
@@ -401,7 +402,7 @@ fn send_control(socket: &UdpSocket, destination: SocketAddr, message: &ControlMe
 
 // UDP send completion does not guarantee receive readiness, even on loopback.
 // Keep the simulated tick timestamp deterministic while waiting for the OS.
-fn wait_for_datagram(socket: &UdpSocket) {
+pub(super) fn wait_for_datagram(socket: &UdpSocket) {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match socket.peek(&mut [0; 65_535]) {
@@ -930,7 +931,7 @@ fn four_remote_peers_reach_the_hardware_mixer_through_the_real_sfu() {
             let ready = net.peers.values().map(|peer| peer.ready_at).max().unwrap();
             // Prefill the remote SPSC queues before the first hardware callback.
             // The first decoded frame remains at the head; subsequent ticks supply the reserve.
-            for tick in 0..8 {
+            for tick in 0..3 {
                 net.tick(mic, rx, ready + CHUNK_TIME * tick).unwrap();
             }
             let mut output = [0.0_f32; FRAME_SAMPLES * 2];
@@ -1004,6 +1005,8 @@ fn roster_tracks_silent_peers_and_resets_departed_controls() {
     network.peer_id = Some(1);
     let (speaker, _) = crate::mixer::channels(crate::audio::BUFFER_FRAMES);
     let peer = |id, name| jam_protocol::PeerInfo {
+        public_addr: "127.0.0.1:5000".parse().unwrap(),
+        local_addr: None,
         peer_id: id,
         nickname: [name; NICKNAME_CAPACITY],
         nickname_len: 1,
@@ -1370,7 +1373,7 @@ fn interval_peaks_reset_without_repeating_stale_rtt() {
 }
 
 #[test]
-fn mixer_stays_ready_through_five_to_fifteen_ms_worker_gaps() {
+fn lean_mixer_stays_ready_with_normal_worker_cadence() {
     use std::sync::atomic::Ordering;
     for frames in [64, 128, 256] {
         for phase in [0, 1, 63, 119] {
@@ -1412,7 +1415,7 @@ fn mixer_stays_ready_through_five_to_fifteen_ms_worker_gaps() {
                 }
                 if sample as usize == next_wake {
                     network.playback(&mut speaker, now).unwrap();
-                    next_wake += [120, 240, 480, 720, 48][wake % 5];
+                    next_wake += [12, 48, 72, 60, 24][wake % 5];
                     wake += 1;
                 }
             }
@@ -1535,4 +1538,154 @@ fn future_or_other_peer_packets_do_not_hide_a_genuinely_late_stream() {
             .unwrap();
     }
     assert_eq!(network.peers[&2].diagnostics.resyncs, 1);
+}
+
+#[test]
+fn lean_receive_budget_and_recovery_after_a_fifteen_ms_worker_stall() {
+    // Normal cadence must have no underflows; a stall longer than the fixed
+    // reserve may conceal audio, but must recover without growing latency.
+    for frames in [64, 128, 256] {
+        for stall in [false, true] {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut network = Network::connect(server.local_addr().unwrap(), "budget").unwrap();
+            let (mut speaker, mut mixer) = crate::mixer::channels(frames);
+            let stats = crate::audio::Stats::default();
+            let start = network.started;
+            let mut encoder = codec::encoder().unwrap();
+            let mut output = vec![0.0_f32; frames * 2];
+            let mut next_wake = 0;
+            let mut wake = 0;
+            let mut recovery_underflows = 0;
+            let mut max_buffer_ms = 0.0_f64;
+            let mut buffer_total = 0.0;
+            let mut buffer_count = 0;
+            for sample in 0..96_000_u32 {
+                let now = start + Duration::from_secs_f64(f64::from(sample) / 48_000.0);
+                if sample % u32::try_from(FRAME_SAMPLES).unwrap() == 0 {
+                    let sequence = sample / u32::try_from(FRAME_SAMPLES).unwrap();
+                    network.delayed.push(Delayed {
+                        due: now + Duration::from_micros(u64::from((sequence * 7919) % 2500)),
+                        peer: 2,
+                        sequence,
+                        chunk: codec::tests::encode(&mut encoder, 0.5),
+                    });
+                }
+                if sample as usize % frames == 0 {
+                    mixer.playback(&mut output, 2, &stats);
+                    assert!(output.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+                    if sample >= 15_000 {
+                        assert!(
+                            output.iter().any(|s| s.abs() > 0.01),
+                            "frames={frames}, sample={sample}"
+                        );
+                        assert_eq!(
+                            stats.output_underflows.load(Ordering::Relaxed),
+                            recovery_underflows
+                        );
+                    }
+                }
+                if sample == next_wake {
+                    network.playback(&mut speaker, now).unwrap();
+                    next_wake += [12, 48, 72, 60, 24][wake % 5];
+                    wake += 1;
+                    if stall && (12_000..12_072).contains(&sample) {
+                        next_wake += 720;
+                    }
+                    if sample > 15_000 {
+                        let peer = &network.peers[&2];
+                        let buffered = peer.buffered_ms()
+                            + f64::from(u32::try_from(mixer.rings[1].slots()).unwrap()) / 48.0;
+                        max_buffer_ms = max_buffer_ms.max(buffered);
+                        buffer_total += buffered;
+                        buffer_count += 1;
+                        if frames == 64 {
+                            let budget = telemetry::LatencyBudget::estimate(
+                                64,
+                                64,
+                                120,
+                                Some(24.0),
+                                peer.buffered_ms(),
+                            );
+                            assert!(budget.rx_buffer_ms <= 15.0);
+                        }
+                        assert_eq!(peer.target_chunks(), 3);
+                    }
+                }
+                if sample == 14_999 {
+                    recovery_underflows = stats.output_underflows.load(Ordering::Relaxed);
+                }
+            }
+            if !stall {
+                assert_eq!(
+                    stats.output_underflows.load(Ordering::Relaxed),
+                    0,
+                    "frames={frames}"
+                );
+            } else if frames == 64 {
+                assert!(recovery_underflows > 0, "15 ms exceeds the 5 ms reserve");
+            }
+            if frames == 64 {
+                assert!(
+                    max_buffer_ms <= 17.5,
+                    "peak receive buffering={max_buffer_ms} ms"
+                );
+                // Whole chunks and callback timing briefly exceed the steady mean.
+                let average = buffer_total / f64::from(buffer_count);
+                assert!(average <= 15.0, "mean receive buffering={average} ms");
+                eprintln!(
+                    "64f, stall={stall}: mean RX={average:.3} ms, peak RX={max_buffer_ms:.3} ms, underflows={recovery_underflows}"
+                );
+            }
+            assert_eq!(network.peers[&2].diagnostics.rx_push_dropped, 0);
+        }
+    }
+}
+
+#[test]
+fn tempo_leader_includes_actual_hardware_codec_and_stable_adaptive_target() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut network = Network::connect(server.local_addr().unwrap(), "phase").unwrap();
+    network.peer_id = Some(1);
+    network.rtt = Some((24.0, network.started));
+    let config = MetronomeConfig {
+        leader_peer_id: 2,
+        ..MetronomeConfig::default()
+    };
+    for (frames, reserve) in [(64, 240), (128, 376), (256, 632)] {
+        let (speaker, mut mixer) = crate::mixer::channels(frames);
+        let stats = crate::audio::Stats::default();
+        for target in [3, 8] {
+            network.peers.insert(
+                2,
+                PeerJitterBuffer::new(0, network.started, target).unwrap(),
+            );
+            let expected = 1152
+                + frames * 2
+                + 120
+                + network.codec_lookahead_samples as usize
+                + target * 120
+                + reserve;
+            assert_eq!(
+                network.leader_phase_delay_samples(config, &speaker),
+                u32::try_from(expected).unwrap()
+            );
+            // An observed callback size overrides the requested playback size.
+            mixer.playback(&mut vec![0.0_f32; 64 * 2], 2, &stats);
+            assert_eq!(
+                network.leader_phase_delay_samples(config, &speaker),
+                u32::try_from(
+                    1152 + frames
+                        + 64
+                        + 120
+                        + network.codec_lookahead_samples as usize
+                        + target * 120
+                        + 240
+                )
+                .unwrap()
+            );
+            speaker
+                .output_frames
+                .store(u32::try_from(frames).unwrap(), Ordering::Relaxed);
+        }
+    }
 }

@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "jam-client"
-version = "1.0.4-beta"
+version = "1.0.5-beta"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -1298,11 +1298,11 @@ dependencies = [
 
 [[package]]
 name = "jam-protocol"
-version = "1.0.4-beta"
+version = "1.0.5-beta"
 
 [[package]]
 name = "jam-server"
-version = "1.0.4-beta"
+version = "1.0.5-beta"
 dependencies = [
  "jam-protocol",
 ]

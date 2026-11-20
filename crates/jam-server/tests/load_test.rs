@@ -29,6 +29,7 @@ struct BotReport {
 fn join_room(socket: &UdpSocket) -> u8 {
     socket.set_read_timeout(Some(STARTUP_TIMEOUT)).unwrap();
     let message = ControlMessage::JoinRequest {
+        local_addr: None,
         nickname: [0; NICKNAME_CAPACITY],
         nickname_len: 0,
     };
