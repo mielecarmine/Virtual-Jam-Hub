@@ -3,6 +3,10 @@ name = "jam-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Low-latency real-time audio client, jitter buffer, Opus codec, mixer, and desktop GUI for Virtual Jam"
 
 [features]
 default = []

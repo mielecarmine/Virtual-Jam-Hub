@@ -1023,3 +1023,56 @@ reverse proxy HTTPS (Caddy o Nginx) su `185.198.245.40`, con catalogazione deter
 limiti rigidi di payload (`<= 256 KiB` client, `<= 2 MiB` server), token beta opzionale
 e retention/quota disco automatica. Per l'installazione e la configurazione HTTPS seguire
 [deploy/collector/README.md](deploy/collector/README.md).
+
+---
+
+### Privacy / Telemetry Notice
+
+Virtual Jam rispetta la privacy degli utenti e segue un approccio **opt-in esplicito**
+conforme ai principi FOSS e GDPR:
+
+- **Nessun invio automatico di default:** la condivisione remota di log operativi
+  (`jam-server`) e report di fine sessione (`jam-client`) è disabilitata per impostazione
+  predefinita (`share_telemetry = false` in `client.toml`; assenza del flag `--share-logs`
+  in CLI/server).
+- **Log locali di pre-release (`telemetry-log`):** nelle build di pre-release (`alpha`/`beta`/`rc`),
+  il client salva un file locale `telemetry-*.txt` accanto a `client.toml` per facilitare
+  il debug di audio e rete. Questo file rimane sul dispositivo dell'utente salvo invio manuale.
+- **Contenuto dei report remoti (solo con opt-in attivo):** vengono trasmessi esclusivamente
+  metadati tecnici aggregati (versione, OS/architettura, backend audio, sample rate, buffer
+  size, modalità P2P/SFU, durata sessione, RTT/jitter/packet loss, contatori di
+  overflow/underflow, scarti jitter buffer e attivazioni PLC). **Nessun flusso audio,
+  nickname, elenco dispositivi personali o contenuto della sessione viene mai registrato o
+  trasmesso.**
+- **Catalogazione lato collettore:** il servizio ricevitore centrale cataloga i file per data
+  UTC e indirizzo IP sorgente della richiesta HTTP ai soli fini diagnostici della beta, con
+  pulizia automatica basata su retention/quota disco configurabile.
+- **Controllo completo:** l'utente può abilitare o disabilitare l'invio in qualsiasi momento
+  dalla GUI desktop, dal file `client.toml` o tramite i flag CLI/server, oppure puntare un
+  proprio collettore self-hosted tramite `JAM_TELEMETRY_ENDPOINT` / `--telemetry-endpoint`.
+
+---
+
+### License
+
+Virtual Jam è software libero (FOSS) rilasciato sotto licenza **GNU General Public License v3.0
+o successiva (`GPL-3.0-or-later`)**. Il testo integrale della licenza è disponibile nel file
+[LICENSE](LICENSE).
+
+#### Eccezione aggiuntiva per Steinberg ASIO SDK (GPLv3 Sezione 7)
+
+Ai sensi della Sezione 7 della GNU General Public License v3.0, gli autori di Virtual Jam
+concedono l'autorizzazione aggiuntiva a collegare (*link*) il codice sorgente di Virtual Jam
+con lo **Steinberg ASIO SDK** proprietario (utilizzato opzionalmente da `cpal` sulle build
+Windows per il supporto a bassissima latenza ASIO) e a distribuire l'eseguibile risultante,
+a condizione che siano rispettati i termini della GPLv3 per tutte le restanti parti del
+programma e i termini di licenza dello Steinberg ASIO SDK.
+
+#### Conformità delle dipendenze di terze parti
+
+Tutte le dipendenze Rust del workspace (incluse `cpal`, `opus` / `opusic-sys` BSD-3-Clause,
+`rtrb`, `eframe`/`egui`, `ureq`, `rustls`, `ring`) sono state verificate tramite
+`cargo metadata` e risultano pienamente compatibili con `GPL-3.0-or-later`. La policy
+di verifica automatica per `cargo-deny` è definita in [deny.toml](deny.toml).
+
+Per contribuire al progetto, consultare [CONTRIBUTING.md](CONTRIBUTING.md).

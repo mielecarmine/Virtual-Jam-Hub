@@ -3,6 +3,10 @@ name = "jam-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Zero-copy binary UDP audio and control protocol shared across Virtual Jam components"
 
 [lints]
 workspace = true
