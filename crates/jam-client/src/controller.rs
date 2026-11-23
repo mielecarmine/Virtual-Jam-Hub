@@ -43,6 +43,8 @@ pub struct MixerView {
     pub metronome: Arc<mixer::MetronomeControls>,
     pub stats: Arc<Stats>,
     pub local_control: Arc<mixer::Controls>,
+    pub local_mic_control: Arc<mixer::Controls>,
+    pub mic_enabled: bool,
     pub peers: Vec<jam_protocol::PeerInfo>,
     pub controls: Arc<[mixer::Controls; jam_protocol::MAX_PEERS]>,
 }
@@ -104,6 +106,7 @@ impl Controller {
 
 // A session is created and destroyed on its owning thread (CPAL streams can be !Send).
 struct Session {
+    mic_enabled: bool,
     published_metronome: Option<jam_protocol::MetronomeState>,
     buffer_frames: u32,
     audio_backend: String,
@@ -123,6 +126,7 @@ struct Session {
 impl Session {
     fn start(preferences: &Preferences) -> io::Result<Self> {
         let endpoint = preferences.endpoint()?;
+        let routing = preferences.input_routing()?;
         let build = || -> Result<Self, Box<dyn std::error::Error>> {
             let host = cli::host(preferences.host.as_deref())?;
             let audio_backend = host.id().name().to_owned();
@@ -139,11 +143,16 @@ impl Session {
                 output: Some(output.name()?),
                 ..preferences.clone()
             };
-            let input_config =
-                audio::select_input_config_for_buffer(input.supported_input_configs()?, frames)
-                    .ok_or_else(|| {
-                        io::Error::other("Input incompatibile con 48 kHz e il buffer scelto.")
-                    })?;
+            let input_config = audio::select_input_config_for_channels(
+                input.supported_input_configs()?,
+                frames,
+                routing.required_channels(),
+            )
+            .ok_or_else(|| {
+                io::Error::other(
+                    "Input incompatibile con i canali selezionati, 48 kHz e il buffer scelto.",
+                )
+            })?;
             let output_config =
                 audio::select_output_config_for_buffer(output.supported_output_configs()?, frames)
                     .ok_or_else(|| {
@@ -153,10 +162,11 @@ impl Session {
             let stats = Arc::new(Stats::default());
             let (producer, mic) = RingBuffer::new(audio::RING_CAPACITY);
             let (rx, mut mixer) = mixer::channels(frames as usize);
-            let monitor = mixer.enable_local_monitor();
+            let monitor = mixer.enable_local_sources(routing.mic_enabled());
             let input = streams::input(
                 &input,
                 &input_config,
+                routing,
                 producer,
                 Some(monitor),
                 Arc::clone(&stats),
@@ -168,6 +178,7 @@ impl Session {
                 Arc::clone(&stats),
             )?;
             let session = Self {
+                mic_enabled: routing.mic_enabled(),
                 published_metronome: None,
                 buffer_frames: frames,
                 audio_backend,
@@ -303,6 +314,8 @@ impl ActiveSession for Session {
             stats: Arc::clone(&self.stats),
             controls: Arc::clone(&self.rx.controls),
             local_control: Arc::clone(&self.rx.local_control),
+            local_mic_control: Arc::clone(&self.rx.local_mic_control),
+            mic_enabled: self.mic_enabled,
         })
     }
 

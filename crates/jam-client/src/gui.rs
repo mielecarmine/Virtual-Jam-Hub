@@ -54,7 +54,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 struct AppState {
     metronome: Option<jam_protocol::MetronomeState>,
     telemetry: crate::network::Telemetry,
-    meters: [Meter; jam_protocol::MAX_PEERS + 1],
+    meters: [Meter; jam_protocol::MAX_PEERS + 2],
     mixer: Option<MixerView>,
     preferences: Preferences,
     controller: Controller,
@@ -124,6 +124,54 @@ impl AppState {
         }
     }
 
+    fn audio_devices(&mut self, ui: &mut egui::Ui) {
+        device_combo(
+            ui,
+            "input",
+            "Ingresso",
+            &mut self.preferences.input,
+            &self.catalog.inputs,
+        );
+        let max_channels = self
+            .catalog
+            .selected_input(&self.preferences)
+            .map_or(0, |device| device.max_channels);
+        channel_combos(ui, &mut self.preferences, max_channels);
+        if let Err(error) = self.catalog.validate_input(&self.preferences) {
+            ui.colored_label(egui::Color32::YELLOW, error.to_string());
+        }
+        device_combo(
+            ui,
+            "output",
+            "Uscita",
+            &mut self.preferences.output,
+            &self.catalog.outputs,
+        );
+        ui.label("Buffer (frame a 48 kHz)");
+        let supported = self.catalog.buffers(&self.preferences);
+        egui::ComboBox::from_id_salt("buffer")
+            .width(350.0)
+            .selected_text(format!("{} frame", self.preferences.buffer_frames))
+            .show_ui(ui, |ui| {
+                for frames in setup::BUFFER_SIZES {
+                    let available = supported.contains(&frames);
+                    ui.add_enabled_ui(available, |ui| {
+                        ui.selectable_value(
+                            &mut self.preferences.buffer_frames,
+                            frames,
+                            format!("{frames} frame · {:.2} ms", f64::from(frames) / 48.0),
+                        );
+                    });
+                }
+            });
+        if !supported.contains(&self.preferences.buffer_frames) {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Buffer non disponibile per questa coppia di dispositivi a 48 kHz.",
+            );
+        }
+    }
+
     fn setup(&mut self, ui: &mut egui::Ui) {
         let previous = self.preferences.clone();
         let idle = self.phase == Phase::Disconnected && !self.disconnecting;
@@ -157,45 +205,7 @@ impl AppState {
                         ui.selectable_value(&mut self.preferences.host, Some(host.clone()), host);
                     }
                 });
-            ui.add_enabled_ui(!self.loading, |ui| {
-                device_combo(
-                    ui,
-                    "input",
-                    "Ingresso",
-                    &mut self.preferences.input,
-                    &self.catalog.inputs,
-                );
-                device_combo(
-                    ui,
-                    "output",
-                    "Uscita",
-                    &mut self.preferences.output,
-                    &self.catalog.outputs,
-                );
-                ui.label("Buffer (frame a 48 kHz)");
-                let supported = self.catalog.buffers(&self.preferences);
-                egui::ComboBox::from_id_salt("buffer")
-                    .width(350.0)
-                    .selected_text(format!("{} frame", self.preferences.buffer_frames))
-                    .show_ui(ui, |ui| {
-                        for frames in setup::BUFFER_SIZES {
-                            let available = supported.contains(&frames);
-                            ui.add_enabled_ui(available, |ui| {
-                                ui.selectable_value(
-                                    &mut self.preferences.buffer_frames,
-                                    frames,
-                                    format!("{frames} frame · {:.2} ms", f64::from(frames) / 48.0),
-                                );
-                            });
-                        }
-                    });
-                if !supported.contains(&self.preferences.buffer_frames) {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Buffer non disponibile per questa coppia di dispositivi a 48 kHz.",
-                    );
-                }
-            });
+            ui.add_enabled_ui(!self.loading, |ui| self.audio_devices(ui));
             ui.small(
                 "Se il driver non dichiara i buffer supportati, \
                  la verifica avviene alla connessione.",
@@ -220,6 +230,8 @@ impl AppState {
                 || previous.input != self.preferences.input
                 || previous.output != self.preferences.output
                 || previous.buffer_frames != self.preferences.buffer_frames
+                || previous.instrument_channel != self.preferences.instrument_channel
+                || previous.mic_channel != self.preferences.mic_channel
             {
                 self.command(Command::SelectDevice(self.preferences.clone()));
                 self.changed_at = None;
@@ -245,11 +257,28 @@ impl AppState {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(110.0);
                     ui.vertical_centered(|ui| {
-                        ui.strong("Ingresso locale");
+                        ui.strong("Strumento locale");
                         self.meters[0].show(ui, &view.stats.input_peak);
                         monitoring_controls(ui, &view.local_control);
                     });
                 });
+                if view.mic_enabled {
+                    ui.push_id("local_mic", |ui| {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(110.0);
+                            ui.vertical_centered(|ui| {
+                                ui.strong("Microfono locale");
+                                self.meters[jam_protocol::MAX_PEERS + 1]
+                                    .show(ui, &view.stats.mic_peak);
+                                monitoring_controls(ui, &view.local_mic_control);
+                                let mut muted = view.stats.mic_tx_mute.load(Ordering::Relaxed);
+                                if ui.toggle_value(&mut muted, "Mute Mic (Rete)").changed() {
+                                    view.stats.mic_tx_mute.store(muted, Ordering::Relaxed);
+                                }
+                            });
+                        });
+                    });
+                }
                 for peer in &view.peers {
                     ui.push_id(peer.peer_id, |ui| {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -360,7 +389,10 @@ impl AppState {
         };
         ui.strong(label);
         if self.phase == Phase::Disconnected && !self.disconnecting {
-            let validation = self.preferences.endpoint();
+            let validation = self
+                .preferences
+                .endpoint()
+                .and_then(|_| self.catalog.validate_input(&self.preferences));
             if let Err(error) = &validation {
                 ui.label(error.to_string());
             }
@@ -485,6 +517,51 @@ fn click_monitoring(
     );
 }
 
+fn channel_combos(ui: &mut egui::Ui, preferences: &mut Preferences, max_channels: u16) {
+    let label = |channel: u16| {
+        if channel == 0 || channel > max_channels {
+            format!("Canale {channel} (non disponibile)")
+        } else {
+            format!("Canale {channel}")
+        }
+    };
+    ui.label("Canale strumento");
+    egui::ComboBox::from_id_salt("instrument_channel")
+        .width(350.0)
+        .selected_text(label(preferences.instrument_channel))
+        .show_ui(ui, |ui| {
+            for channel in 1..=max_channels {
+                ui.add_enabled_ui(preferences.mic_channel != Some(channel), |ui| {
+                    ui.selectable_value(
+                        &mut preferences.instrument_channel,
+                        channel,
+                        label(channel),
+                    );
+                });
+            }
+        });
+    ui.label("Canale microfono");
+    egui::ComboBox::from_id_salt("mic_channel")
+        .width(350.0)
+        .selected_text(
+            preferences
+                .mic_channel
+                .map_or_else(|| "Disabilitato".into(), label),
+        )
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut preferences.mic_channel, None, "Disabilitato");
+            for channel in 1..=max_channels {
+                ui.add_enabled_ui(preferences.instrument_channel != channel, |ui| {
+                    ui.selectable_value(
+                        &mut preferences.mic_channel,
+                        Some(channel),
+                        label(channel),
+                    );
+                });
+            }
+        });
+}
+
 fn device_combo(
     ui: &mut egui::Ui,
     id: &str,
@@ -538,8 +615,8 @@ impl eframe::App for AppState {
                 ui.heading("Virtual Jam");
                 ui.label("Collega il tuo strumento e raggiungi la band.");
                 ui.small(
-                    "Usa le cuffie. I controlli di Ingresso locale regolano solo il tuo ascolto; \
-                     il segnale inviato ai peer resta invariato.",
+                    "Usa le cuffie. Gain, Mute e Solo regolano il tuo ascolto. \
+                     Mute Mic (Rete) esclude il microfono dal segnale inviato alla band.",
                 );
                 ui.add_space(16.0);
                 self.setup(ui);

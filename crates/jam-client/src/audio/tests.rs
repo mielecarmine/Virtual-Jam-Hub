@@ -4,6 +4,132 @@ use rtrb::RingBuffer;
 pub(crate) mod allocation;
 
 #[test]
+fn routing_validates_one_based_distinct_channels_and_hardware_bounds() {
+    for (instrument, mic) in [(0, None), (1, Some(0)), (2, Some(2))] {
+        assert!(InputRouting::new(instrument, mic).is_err());
+    }
+    assert_eq!(InputRouting::new(1, None).unwrap(), InputRouting::default());
+    assert_eq!(
+        InputRouting::new(2, Some(4)).unwrap().required_channels(),
+        4
+    );
+    assert_eq!(
+        InputRouting::new(u16::MAX, None)
+            .unwrap()
+            .required_channels(),
+        u16::MAX
+    );
+    let (mut tx, mut rx) = RingBuffer::new(4);
+    let stats = Stats::default();
+    capture(
+        &[0.1, 0.2],
+        2,
+        InputRouting::new(3, None).unwrap(),
+        &mut tx,
+        None,
+        &stats,
+    );
+    assert!(rx.pop().is_err());
+    assert_eq!(stats.wrong_buffer_sizes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn multichannel_config_requires_channels_rate_and_buffer_before_ranking_formats() {
+    let fixed = SupportedBufferSize::Range { min: 128, max: 128 };
+    let configs = [
+        config(1, SampleFormat::F32, fixed),
+        config(2, SampleFormat::I16, fixed),
+        config(8, SampleFormat::F32, fixed),
+        config(4, SampleFormat::F32, fixed),
+        config(
+            16,
+            SampleFormat::F32,
+            SupportedBufferSize::Range { min: 256, max: 256 },
+        ),
+        cpal::SupportedStreamConfigRange::new(
+            32,
+            SampleRate(44_100),
+            SampleRate(44_100),
+            fixed,
+            SampleFormat::F32,
+        ),
+    ];
+    for (required, expected) in [(1, 1), (2, 4), (4, 4), (5, 8)] {
+        let selected =
+            select_input_config_for_channels(configs.into_iter(), 128, required).unwrap();
+        assert_eq!(selected.stream.channels, expected);
+        assert_eq!(selected.format, SampleFormat::F32);
+    }
+    assert!(select_input_config_for_channels(configs.into_iter(), 128, 9).is_none());
+    assert_eq!(
+        select_input_config_for_channels(configs.into_iter(), 256, 9)
+            .unwrap()
+            .stream
+            .channels,
+        16
+    );
+    assert_eq!(
+        select_input_config_for_channels([configs[1]].into_iter(), 128, 2)
+            .unwrap()
+            .format,
+        SampleFormat::I16
+    );
+}
+
+#[test]
+fn dual_capture_routes_selected_sources_and_mutes_only_network_mic() {
+    let routing = InputRouting::new(3, Some(1)).unwrap();
+    let stats = Stats::default();
+    let (mut tx, mut rx) = RingBuffer::new(8);
+    let (mut monitor, mut playback) = crate::monitor::channel(8);
+    for muted in [false, true, false] {
+        stats.mic_tx_mute.store(muted, Ordering::Relaxed);
+        capture(
+            &[0.25_f32, 9.0, 0.5, -9.0],
+            4,
+            routing,
+            &mut tx,
+            Some(&mut monitor),
+            &stats,
+        );
+        assert_eq!(rx.pop(), Ok(if muted { 0.5 } else { 0.75 }));
+        assert_eq!(playback.pop(), Some([0.5, 0.25]));
+    }
+    assert_eq!(
+        f32::from_bits(stats.input_peak.load(Ordering::Relaxed)),
+        0.5
+    );
+    assert_eq!(f32::from_bits(stats.mic_peak.load(Ordering::Relaxed)), 0.25);
+    // No averaging or clipping in capture; invalid sources cannot silence the other source.
+    capture(
+        &[0.75_f32, 0.5, f32::NAN, 0.5, 0.25, f32::INFINITY],
+        2,
+        InputRouting::new(1, Some(2)).unwrap(),
+        &mut tx,
+        None,
+        &stats,
+    );
+    assert_eq!(rx.pop(), Ok(1.25));
+    assert_eq!(rx.pop(), Ok(0.5));
+    assert_eq!(rx.pop(), Ok(0.25));
+    let (mut full, _consumer) = RingBuffer::new(1);
+    capture(
+        &[0.1_f32, -0.9, -0.8, 0.1],
+        2,
+        InputRouting::new(1, Some(2)).unwrap(),
+        &mut full,
+        None,
+        &stats,
+    );
+    assert_eq!(stats.input_overflows.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        f32::from_bits(stats.input_peak.load(Ordering::Relaxed)),
+        0.8
+    );
+    assert_eq!(f32::from_bits(stats.mic_peak.load(Ordering::Relaxed)), 0.9);
+}
+
+#[test]
 fn stalled_local_monitor_does_not_drop_or_change_network_audio() {
     let stats = Stats::default();
     let (mut mic, mut net) = RingBuffer::new(BUFFER_FRAMES);
@@ -12,6 +138,7 @@ fn stalled_local_monitor_does_not_drop_or_change_network_audio() {
         capture(
             &[0.25; BUFFER_FRAMES],
             1,
+            crate::audio::InputRouting::default(),
             &mut mic,
             Some(&mut monitor),
             &stats,
@@ -197,7 +324,14 @@ where
         frame[0] = T::from_sample(if index % 2 == 0 { -0.5_f32 } else { 0.5 });
         frame[1] = T::EQUILIBRIUM;
     }
-    capture(&input, 2, &mut mic, None, &stats);
+    capture(
+        &input,
+        2,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     assert_eq!(bridge(&mut net_input, &mut net_output), PREFILL_SAMPLES);
     let mut output = [T::EQUILIBRIUM; PREFILL_SAMPLES * 2];
     let mut started = false;
@@ -269,11 +403,25 @@ fn loopback_preserves_first_input_channel_and_duplicates_to_stereo_across_wraps(
     }
     let mut output = [0.0; 2 * BUFFER_FRAMES];
     let mut started = false;
-    capture(&input, 2, &mut mic, None, &stats);
+    capture(
+        &input,
+        2,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     bridge(&mut net_input, &mut net_output);
     // Two blocks establish the small startup cushion.
     for _ in 0..200 {
-        capture(&input, 2, &mut mic, None, &stats);
+        capture(
+            &input,
+            2,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            None,
+            &stats,
+        );
         assert_eq!(bridge(&mut net_input, &mut net_output), BUFFER_FRAMES);
         playback(&mut output, 2, &mut speaker, &mut started, &stats);
         for (captured, played) in input.chunks_exact(2).zip(output.chunks_exact(2)) {
@@ -314,9 +462,23 @@ fn full_rings_never_block_or_overwrite_queued_audio() {
     let (mut mic, mut net_input) = RingBuffer::new(RING_CAPACITY);
     let (mut net_output, mut speaker) = RingBuffer::new(RING_CAPACITY);
     for _ in 0..RING_CAPACITY / BUFFER_FRAMES {
-        capture(&[0.5; BUFFER_FRAMES], 1, &mut mic, None, &stats);
+        capture(
+            &[0.5; BUFFER_FRAMES],
+            1,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            None,
+            &stats,
+        );
     }
-    capture(&[1.0; BUFFER_FRAMES], 1, &mut mic, None, &stats);
+    capture(
+        &[1.0; BUFFER_FRAMES],
+        1,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     assert_eq!(stats.input_overflows.load(Ordering::Relaxed), 128);
     for _ in 0..RING_CAPACITY {
         net_output.push(-0.5).expect("space");
@@ -336,7 +498,14 @@ fn incomplete_frames_are_reported_and_output_is_silenced() {
     let stats = Stats::default();
     let (mut mic, _net_input) = RingBuffer::new(RING_CAPACITY);
     let (_net_output, mut speaker) = RingBuffer::new(RING_CAPACITY);
-    capture(&[0.5; 64], 3, &mut mic, None, &stats);
+    capture(
+        &[0.5; 64],
+        3,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     let mut output = [1.0; 64];
     playback(&mut output, 3, &mut speaker, &mut false, &stats);
     assert_eq!(output, [0.0; 64]);
@@ -350,9 +519,23 @@ fn alsa_periods_and_coalesced_callbacks_preserve_sample_order() {
     let (mut mic, mut net_input) = RingBuffer::new(RING_CAPACITY);
     let (mut net_output, mut speaker) = RingBuffer::new(RING_CAPACITY);
     for value in [0.25, 0.5, 0.75, 1.0] {
-        capture(&[value; 64], 2, &mut mic, None, &stats);
+        capture(
+            &[value; 64],
+            2,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            None,
+            &stats,
+        );
     }
-    capture(&[0.0; 256], 2, &mut mic, None, &stats);
+    capture(
+        &[0.0; 256],
+        2,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     assert_eq!(bridge(&mut net_input, &mut net_output), 256);
     let mut started = false;
     let mut output = [0.0; 512];
@@ -369,13 +552,34 @@ fn alsa_periods_and_coalesced_callbacks_preserve_sample_order() {
 fn input_peak_survives_between_ui_frames_even_if_ring_overflows() {
     let stats = Stats::default();
     let (mut input, _consumer) = RingBuffer::new(1);
-    capture(&[0.2, 0.9, -1.2, f32::NAN], 1, &mut input, None, &stats);
-    capture(&[0.1], 1, &mut input, None, &stats);
+    capture(
+        &[0.2, 0.9, -1.2, f32::NAN],
+        1,
+        crate::audio::InputRouting::default(),
+        &mut input,
+        None,
+        &stats,
+    );
+    capture(
+        &[0.1],
+        1,
+        crate::audio::InputRouting::default(),
+        &mut input,
+        None,
+        &stats,
+    );
     assert_eq!(
         f32::from_bits(stats.input_peak.swap(0, Ordering::Relaxed)),
         1.2
     );
-    capture(&[0.1, 1.0], 2, &mut input, None, &stats);
+    capture(
+        &[0.1, 1.0],
+        2,
+        crate::audio::InputRouting::default(),
+        &mut input,
+        None,
+        &stats,
+    );
     assert_eq!(
         f32::from_bits(stats.input_peak.load(Ordering::Relaxed)),
         0.1

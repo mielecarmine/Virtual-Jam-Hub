@@ -106,6 +106,7 @@ pub struct RxChannels {
     pub rings: [Producer<QueuedSample>; MAX_PEERS],
     pub controls: Arc<[Controls; MAX_PEERS]>,
     pub local_control: Arc<Controls>,
+    pub local_mic_control: Arc<Controls>,
     pub metronome: Arc<MetronomeControls>,
 }
 
@@ -114,6 +115,8 @@ pub struct Mixer {
     pub(crate) rings: [Consumer<QueuedSample>; MAX_PEERS],
     pub controls: Arc<[Controls; MAX_PEERS]>,
     local_control: Arc<Controls>,
+    local_mic_control: Arc<Controls>,
+    local_mic_enabled: bool,
     local: Option<crate::monitor::Playback>,
     epochs: [u32; MAX_PEERS],
     ready: [bool; MAX_PEERS],
@@ -132,6 +135,7 @@ pub fn channels(frames: usize) -> (RxChannels, Mixer) {
 pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
     let controls = Arc::new(std::array::from_fn(|_| Controls::default()));
     let local_control = Arc::new(Controls::default());
+    let local_mic_control = Arc::new(Controls::default());
     let metronome = Arc::new(MetronomeControls::default());
     let output_frames = Arc::new(AtomicU32::new(0));
     let pairs = std::array::from_fn::<_, MAX_PEERS, _>(|_| RingBuffer::new(capacity));
@@ -143,6 +147,7 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
         rings,
         controls: Arc::clone(&controls),
         local_control: Arc::clone(&local_control),
+        local_mic_control: Arc::clone(&local_mic_control),
         metronome: Arc::clone(&metronome),
     };
     let rings = consumers.try_into().unwrap_or_else(|_| unreachable!());
@@ -153,6 +158,8 @@ pub(crate) fn channels_with_capacity(capacity: usize) -> (RxChannels, Mixer) {
             rings,
             controls,
             local_control,
+            local_mic_control,
+            local_mic_enabled: false,
             local: None,
             epochs: [0; MAX_PEERS],
             ready: [false; MAX_PEERS],
@@ -209,8 +216,13 @@ impl RxChannels {
 impl Mixer {
     /// Allocate the direct monitoring path before starting the hardware callbacks.
     pub fn enable_local_monitor(&mut self) -> crate::monitor::Capture {
+        self.enable_local_sources(false)
+    }
+
+    pub fn enable_local_sources(&mut self, mic_enabled: bool) -> crate::monitor::Capture {
         let (capture, playback) = crate::monitor::channel(crate::audio::RING_CAPACITY);
         self.local = Some(playback);
+        self.local_mic_enabled = mic_enabled;
         capture
     }
 
@@ -263,18 +275,25 @@ impl Mixer {
         if sample.is_some() {
             stats.playback_started.store(true, Ordering::Relaxed);
         }
-        let value = sample.unwrap_or(0.0);
-        let control = &self.local_control;
-        let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
-        if value.is_finite()
-            && gain.is_finite()
-            && !control.mute.load(Ordering::Relaxed)
-            && (!solo || control.solo.load(Ordering::Relaxed))
-        {
-            f64::from(value) * f64::from(gain)
-        } else {
-            0.0
-        }
+        let [instrument, mic] = sample.unwrap_or([0.0; 2]);
+        let render = |value: f32, control: &Controls| {
+            let gain = f32::from_bits(control.gain.load(Ordering::Relaxed));
+            if value.is_finite()
+                && gain.is_finite()
+                && !control.mute.load(Ordering::Relaxed)
+                && (!solo || control.solo.load(Ordering::Relaxed))
+            {
+                f64::from(value) * f64::from(gain)
+            } else {
+                0.0
+            }
+        };
+        render(instrument, &self.local_control)
+            + if self.local_mic_enabled {
+                render(mic, &self.local_mic_control)
+            } else {
+                0.0
+            }
     }
 
     pub fn playback<T: Sample + FromSample<f32>>(
@@ -307,6 +326,9 @@ impl Mixer {
         let mut block_missing = [0_usize; MAX_PEERS];
         for frame in data.chunks_exact_mut(channels) {
             let solo = (self.local.is_some() && self.local_control.solo.load(Ordering::Relaxed))
+                || (self.local.is_some()
+                    && self.local_mic_enabled
+                    && self.local_mic_control.solo.load(Ordering::Relaxed))
                 || self.controls.iter().any(|c| {
                     c.epoch.load(Ordering::Relaxed) % 2 != 0 && c.solo.load(Ordering::Relaxed)
                 });

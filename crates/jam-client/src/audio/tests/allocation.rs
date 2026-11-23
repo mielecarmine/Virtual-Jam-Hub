@@ -45,6 +45,33 @@ pub(crate) fn assert_no_allocations(operation: impl FnOnce()) {
 }
 
 #[test]
+fn dual_capture_and_monitor_never_allocate_during_mutes_overflow_or_recovery() {
+    let (rx, mut mixer) = crate::mixer::channels(BUFFER_FRAMES);
+    let mut monitor = mixer.enable_local_sources(true);
+    let routing = InputRouting::new(2, Some(1)).unwrap();
+    let stats = Stats::default();
+    let (mut tx, _net) = RingBuffer::new(1);
+    let input = [8192_i16; BUFFER_FRAMES * 4];
+    let mut out = [0.0_f32; BUFFER_FRAMES * 2];
+    assert_no_allocations(|| {
+        for muted in [false, true, false] {
+            stats.mic_tx_mute.store(muted, Ordering::Relaxed);
+            rx.local_mic_control.mute.store(muted, Ordering::Relaxed);
+            rx.local_mic_control.solo.store(!muted, Ordering::Relaxed);
+            for _ in 0..40 {
+                capture(&input, 4, routing, &mut tx, Some(&mut monitor), &stats);
+            }
+            mixer.playback(&mut out, 2, &stats);
+            capture(&input, 4, routing, &mut tx, Some(&mut monitor), &stats);
+            mixer.playback(&mut out, 2, &stats);
+            mixer.playback(&mut out, 2, &stats);
+        }
+    });
+    assert!(stats.input_overflows.load(Ordering::Relaxed) > 0);
+    assert_eq!(f32::from_bits(stats.mic_peak.load(Ordering::Relaxed)), 0.25);
+}
+
+#[test]
 fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
     let stats = Stats::default();
     let (mut mic, mut net_input) = RingBuffer::new(RING_CAPACITY);
@@ -58,21 +85,56 @@ fn audio_paths_do_not_allocate_including_startup_overflow_and_underflow() {
     ALLOCATIONS.with(|count| count.set(Some(0)));
     playback(&mut output, 2, &mut speaker, &mut started, &stats);
     for _ in 0..100 {
-        capture(&input, 1, &mut mic, None, &stats);
+        capture(
+            &input,
+            1,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            None,
+            &stats,
+        );
         bridge(&mut net_input, &mut net_output);
         playback(&mut output, 2, &mut speaker, &mut started, &stats);
     }
     for _ in 0..100 {
-        capture(&input, 1, &mut mic, None, &stats);
+        capture(
+            &input,
+            1,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            None,
+            &stats,
+        );
     }
     for _ in 0..100 {
         playback(&mut output, 2, &mut speaker, &mut started, &stats);
     }
-    capture(&input[..64], 1, &mut mic, None, &stats);
+    capture(
+        &input[..64],
+        1,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     playback(&mut output[..64], 1, &mut speaker, &mut started, &stats);
-    capture(&input[..64], 3, &mut mic, None, &stats);
+    capture(
+        &input[..64],
+        3,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     playback(&mut output[..64], 3, &mut speaker, &mut started, &stats);
-    capture(&integer_input, 1, &mut mic, None, &stats);
+    capture(
+        &integer_input,
+        1,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        None,
+        &stats,
+    );
     bridge(&mut net_input, &mut net_output);
     playback(&mut integer_output, 1, &mut speaker, &mut started, &stats);
     let allocations = ALLOCATIONS.with(|count| count.replace(None));
@@ -132,19 +194,40 @@ fn direct_monitor_capture_and_mix_do_not_allocate_even_when_full_or_muted() {
     ALLOCATIONS.with(|count| count.set(Some(0)));
     mixer.playback(&mut output, 2, &stats);
     for _ in 0..100 {
-        capture(&input, 1, &mut mic, Some(&mut monitor), &stats);
+        capture(
+            &input,
+            1,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            Some(&mut monitor),
+            &stats,
+        );
     }
     mixer.playback(&mut output, 2, &stats);
     for muted in [true, false] {
         rx.local_control.mute.store(muted, Ordering::Relaxed);
         rx.local_control.solo.store(true, Ordering::Relaxed);
-        capture(&input, 1, &mut mic, Some(&mut monitor), &stats);
+        capture(
+            &input,
+            1,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            Some(&mut monitor),
+            &stats,
+        );
         mixer.playback(&mut output, 2, &stats);
     }
     for _ in 0..100 {
         mixer.playback(&mut output, 2, &stats);
     }
-    capture(&input, 3, &mut mic, Some(&mut monitor), &stats);
+    capture(
+        &input,
+        3,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        Some(&mut monitor),
+        &stats,
+    );
     mixer.playback(&mut output, 3, &stats);
     let allocations = ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(allocations, Some(0));
