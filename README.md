@@ -436,6 +436,23 @@ at 48 kHz, enabling only sizes supported by both devices. If the driver does not
 range, stream construction validates the request. A saved but disconnected device remains
 marked unavailable and is not silently replaced. `Refresh devices` rescans hardware.
 
+Below the input selector, choose a 1-based instrument channel and an optional microphone
+channel on the same interface. Channels must be distinct and available at 48 kHz with the
+selected buffer. Unsupported saved channels remain visible and block connection until
+corrected; switching devices never silently resets routing. Old preferences default to
+instrument channel 1 with the microphone disabled. The corresponding TOML fields are
+`instrument_channel = 1` and optional `mic_channel = 2` (omit it to disable the microphone).
+
+Hardware CLI sessions accept the same routing, for example:
+
+```bash
+cargo run --locked --release -p jam-client -- --server 127.0.0.1:7777 --instrument-channel 1 --mic-channel 2
+cargo run --locked --release -p jam-client -- --instrument-channel 2 --mic-channel off --seconds 10
+```
+
+CLI routing applies to both UDP and local loopback. Non-default hardware routing is
+rejected with `--synthetic`; without channel flags existing behavior is preserved.
+
 `Connect` starts audio and the UDP handshake; the state becomes connected only after
 `JoinAccepted`. A server that fails to accept join within 5 seconds, a hardware error, or
 a timeout returns the screen to disconnected with an error message. `Disconnect` works
@@ -543,11 +560,21 @@ after all platform builds succeed, with SHA-256 checksums.
 
 ### 15. Local Headphone Monitoring — JAM-18
 
-The capture callback feeds the first input channel both to the network and to a dedicated
-`rtrb` SPSC ring for the mixer, bypassing the UDP worker, codec, and jitter buffer.
+The capture callback extracts the selected instrument and optional microphone channels
+from one hardware input stream. A dedicated `rtrb` SPSC ring carries paired samples with
+one shared sample position to the mixer, bypassing the UDP worker, codec, and jitter buffer.
 Initial volume is 0 dB with Mute and Solo off. The mixer does not wait for local prefill:
 it immediately plays available samples on all output channels, applying gain/Mute/Solo and
 shared soft clipping. Controls reset on each new session; the meter stays pre-fader.
+
+The GUI shows **Strumento locale** and, when enabled, **Microfono locale**, with independent
+pre-fader meters, headphone gain (-60 to +6 dB), Mute and Solo. These controls affect only
+headphone monitoring. **Mute Mic (Rete)** independently removes the microphone from TX;
+it does not mute the instrument or the local microphone monitor. It resets to off each
+session. The TX ring receives the 1:1 sum of instrument and unmuted microphone, with no
+additional buffering or gain stage; balance the sources using the interface's physical
+input gains. The existing network clamp to [-1, 1] still applies before Opus encoding.
+Only one mono `STREAM_PRIMARY` is transmitted, with the existing packet size and cadence.
 
 On each output callback, the consumer retains at most one callback's worth of recent
 samples (64/128/256 frames in the GUI, ~1.3/2.7/5.3 ms at 48 kHz, plus hardware buffers).
@@ -561,7 +588,11 @@ under overflow, starting with no peers, underflow, non-finite values, recovery a
 delayed output, position wrap-around, and zero allocations. Manual verification with an
 audio interface and headphones: connect an instrument, join a room, adjust the local input
 strip, and confirm with a second musician that their received signal is unchanged while
-you adjust your own monitoring.
+you adjust your own monitoring. On a multichannel interface, use distinct instrument and
+microphone inputs, confirm their selected channels and meters, then toggle each local
+Mute/Solo and network microphone mute. The second musician should hear both sources until
+network microphone mute is enabled, then only the instrument. Check continuity at all
+supported buffer sizes (64/128/256 frames); headless tests do not measure physical latency.
 
 ### Headless Network Benchmark (JAM-19)
 

@@ -20,6 +20,8 @@ pub struct Preferences {
     pub server: String,
     pub host: Option<String>,
     pub input: Option<String>,
+    pub instrument_channel: u16,
+    pub mic_channel: Option<u16>,
     pub output: Option<String>,
     pub buffer_frames: u32,
     pub share_telemetry: bool,
@@ -34,6 +36,8 @@ impl Default for Preferences {
             server: "127.0.0.1:7777".into(),
             host: None,
             input: None,
+            instrument_channel: 1,
+            mic_channel: None,
             output: None,
             buffer_frames: 128,
             share_telemetry: false,
@@ -44,7 +48,13 @@ impl Default for Preferences {
 }
 
 impl Preferences {
+    pub fn input_routing(&self) -> io::Result<audio::InputRouting> {
+        audio::InputRouting::new(self.instrument_channel, self.mic_channel)
+            .map_err(io::Error::other)
+    }
+
     pub fn endpoint(&self) -> io::Result<SocketAddr> {
+        self.input_routing()?;
         if self.nickname.trim().is_empty() || self.nickname.len() > jam_protocol::NICKNAME_CAPACITY
         {
             return Err(io::Error::other(
@@ -140,6 +150,9 @@ pub fn config_path() -> io::Result<PathBuf> {
 pub struct DeviceInfo {
     pub name: String,
     pub buffers: Vec<u32>,
+    pub max_channels: u16,
+    /// Maximum supported channels for each entry in `BUFFER_SIZES`, at 48 kHz.
+    pub channels_by_buffer: [u16; 3],
 }
 
 #[derive(Clone, Debug, Default)]
@@ -164,6 +177,25 @@ fn info(
 ) -> DeviceInfo {
     DeviceInfo {
         name: name.into(),
+        max_channels: configs
+            .iter()
+            .filter(|c| {
+                c.min_sample_rate().0 <= audio::SAMPLE_RATE
+                    && c.max_sample_rate().0 >= audio::SAMPLE_RATE
+            })
+            .map(cpal::SupportedStreamConfigRange::channels)
+            .max()
+            .unwrap_or(0),
+        channels_by_buffer: BUFFER_SIZES.map(|frames| {
+            configs
+                .iter()
+                .filter_map(|config| {
+                    audio::select_input_config_for_buffer(std::iter::once(*config), frames)
+                        .map(|selected| selected.stream.channels)
+                })
+                .max()
+                .unwrap_or(0)
+        }),
         buffers: BUFFER_SIZES
             .into_iter()
             .filter(|frames| {
@@ -182,6 +214,24 @@ fn info(
 }
 
 impl Catalog {
+    pub fn selected_input(&self, preferences: &Preferences) -> Option<&DeviceInfo> {
+        let name = preferences.input.as_ref().or(self.default_input.as_ref());
+        self.inputs.iter().find(|device| Some(&device.name) == name)
+    }
+
+    pub fn validate_input(&self, preferences: &Preferences) -> io::Result<()> {
+        let routing = preferences.input_routing()?;
+        let input = self
+            .selected_input(preferences)
+            .ok_or_else(|| io::Error::other("Dispositivo di ingresso non disponibile."))?;
+        if routing.required_channels() > input.max_channels {
+            return Err(io::Error::other(
+                "Canali selezionati non disponibili su questo ingresso a 48 kHz.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn discover(host_name: Option<&str>) -> io::Result<Self> {
         let host = cli::host(host_name).map_err(|error| io::Error::other(error.to_string()))?;
         let mut catalog = Self {
@@ -215,18 +265,25 @@ impl Catalog {
     }
 
     pub fn buffers(&self, preferences: &Preferences) -> Vec<u32> {
+        let Ok(routing) = preferences.input_routing() else {
+            return Vec::new();
+        };
         let input = preferences.input.as_ref().or(self.default_input.as_ref());
         let output = preferences.output.as_ref().or(self.default_output.as_ref());
         BUFFER_SIZES
             .into_iter()
             .filter(|frames| {
-                self.inputs
+                self.inputs.iter().any(|d| {
+                    Some(&d.name) == input
+                        && d.buffers.contains(frames)
+                        && BUFFER_SIZES
+                            .iter()
+                            .position(|f| f == frames)
+                            .is_some_and(|i| d.channels_by_buffer[i] >= routing.required_channels())
+                }) && self
+                    .outputs
                     .iter()
-                    .any(|d| Some(&d.name) == input && d.buffers.contains(frames))
-                    && self
-                        .outputs
-                        .iter()
-                        .any(|d| Some(&d.name) == output && d.buffers.contains(frames))
+                    .any(|d| Some(&d.name) == output && d.buffers.contains(frames))
             })
             .collect()
     }

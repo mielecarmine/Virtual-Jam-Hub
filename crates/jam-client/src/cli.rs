@@ -8,7 +8,8 @@ const HELP: &str = "Usage: jam-client (no arguments opens the desktop setup scre
        jam-client [--server IP:PORT] [--nickname NAME] [--host NAME] [--input NAME] [--output NAME] [--seconds N]
        jam-client --server IP:PORT --synthetic [--buffer-frames 64|128|256] [--telemetry-dir DIR] [--bind-ip IP]
        jam-client [--host NAME] --list-devices
-Without --server: local loopback. With --server: UDP Opus audio (2.5 ms, 96 kbps), no local monitoring.
+Input routing: --instrument-channel N (default 1), --mic-channel N|off (default off).
+Without --server: local loopback. With --server: UDP Opus audio (2.5 ms, 96 kbps) and local monitoring.
 Default: system backend/devices, 300 seconds. Host names are case-insensitive.
 Use exact device names from --list-devices. No fallback if a requested device is unavailable.
 Windows: --host asio selects the vendor ASIO driver; --host wasapi selects WASAPI.
@@ -26,6 +27,8 @@ pub struct Options {
     pub server: Option<std::net::SocketAddr>,
     pub nickname: String,
     pub input: Option<String>,
+    pub instrument_channel: u16,
+    pub mic_channel: Option<u16>,
     pub output: Option<String>,
     pub duration: Duration,
     pub buffer_frames: u32,
@@ -77,6 +80,8 @@ impl Options {
             server: None,
             nickname: "musician".into(),
             input: None,
+            instrument_channel: 1,
+            mic_channel: None,
             output: None,
             duration: Duration::from_secs(300),
             buffer_frames: 128,
@@ -109,6 +114,8 @@ impl Options {
                 | "--telemetry-token"
                 | "--host"
                 | "--input"
+                | "--instrument-channel"
+                | "--mic-channel"
                 | "--output"
                 | "--seconds"
                 | "--server"
@@ -173,6 +180,14 @@ impl Options {
                             options.nickname = value;
                         }
                         "--input" => options.input = Some(value),
+                        "--instrument-channel" => options.instrument_channel = value.parse()?,
+                        "--mic-channel" => {
+                            options.mic_channel = if value == "off" {
+                                None
+                            } else {
+                                Some(value.parse()?)
+                            };
+                        }
                         "--output" => options.output = Some(value),
                         _ => {
                             let seconds = value.parse::<u64>()?;
@@ -185,6 +200,11 @@ impl Options {
                 }
                 _ => return Err(format!("Unknown argument: {arg}\n{HELP}").into()),
             }
+        }
+        let routing =
+            crate::audio::InputRouting::new(options.instrument_channel, options.mic_channel)?;
+        if options.synthetic && routing != crate::audio::InputRouting::default() {
+            return Err("--synthetic does not support hardware input channel routing".into());
         }
         if options.synthetic && options.server.is_none() && !options.list {
             return Err("--synthetic requires --server IP:PORT".into());
@@ -291,6 +311,52 @@ pub fn list_devices(host: &cpal::Host) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_options_validate_routing_and_keep_synthetic_hardware_independent() {
+        let defaults = Options::parse(std::iter::empty()).unwrap().unwrap();
+        assert_eq!(
+            (defaults.instrument_channel, defaults.mic_channel),
+            (1, None)
+        );
+        let options =
+            Options::parse(["--instrument-channel", "4", "--mic-channel", "2"].map(str::to_owned))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            (options.instrument_channel, options.mic_channel),
+            (4, Some(2))
+        );
+        let off = Options::parse(["--mic-channel", "off"].map(str::to_owned))
+            .unwrap()
+            .unwrap();
+        assert_eq!(off.mic_channel, None);
+        for args in [
+            vec!["--instrument-channel", "0"],
+            vec!["--mic-channel", "0"],
+            vec!["--mic-channel", "1"],
+            vec!["--instrument-channel", "-1"],
+            vec!["--mic-channel", "65536"],
+            vec!["--mic-channel"],
+            vec!["--instrument-channel", "3", "--mic-channel", "3"],
+            vec![
+                "--server",
+                "127.0.0.1:7777",
+                "--synthetic",
+                "--mic-channel",
+                "2",
+            ],
+            vec![
+                "--server",
+                "127.0.0.1:7777",
+                "--synthetic",
+                "--instrument-channel",
+                "2",
+            ],
+        ] {
+            assert!(Options::parse(args.into_iter().map(str::to_owned)).is_err());
+        }
+    }
 
     #[test]
     fn validates_jitter_and_simulator_ranges() {

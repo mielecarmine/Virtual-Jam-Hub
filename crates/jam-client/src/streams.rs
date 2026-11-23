@@ -29,15 +29,20 @@ macro_rules! dispatch_format {
 pub fn input(
     device: &cpal::Device,
     config: &AudioConfig,
+    routing: audio::InputRouting,
     producer: Producer<f32>,
     monitor: Option<crate::monitor::Capture>,
     stats: Arc<Stats>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    if config.stream.channels < routing.required_channels() {
+        return Err(cpal::BuildStreamError::StreamConfigNotSupported);
+    }
     dispatch_format!(
         config.format,
         build_input,
         device,
         config,
+        routing,
         producer,
         monitor,
         stats
@@ -47,6 +52,7 @@ pub fn input(
 fn build_input<T: SizedSample>(
     device: &cpal::Device,
     config: &AudioConfig,
+    routing: audio::InputRouting,
     mut producer: Producer<f32>,
     mut monitor: Option<crate::monitor::Capture>,
     stats: Arc<Stats>,
@@ -59,7 +65,14 @@ where
     device.build_input_stream(
         &config.stream,
         move |data: &[T], _| {
-            audio::capture(data, channels, &mut producer, monitor.as_mut(), &stats);
+            audio::capture(
+                data,
+                channels,
+                routing,
+                &mut producer,
+                monitor.as_mut(),
+                &stats,
+            );
         },
         move |_| {
             errors.input_errors.fetch_add(1, Ordering::Relaxed);

@@ -44,14 +44,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_cli(&options)
 }
 
+fn cli_input_config(
+    input: &cpal::Device,
+    options: &cli::Options,
+) -> Result<(audio::AudioConfig, audio::InputRouting), Box<dyn Error>> {
+    let routing = audio::InputRouting::new(options.instrument_channel, options.mic_channel)?;
+    let input_config = audio::select_input_config_for_channels(
+        input.supported_input_configs()?,
+        128,
+        routing.required_channels(),
+    )
+    .ok_or_else(|| {
+        io::Error::other("Input does not support selected channels / 48000 Hz / 128 frames")
+    })?;
+    Ok((input_config, routing))
+}
+
 fn run_cli(options: &cli::Options) -> Result<(), Box<dyn Error>> {
     let host = cli::host(options.host.as_deref())?;
     if options.list {
         return cli::list_devices(&host);
     }
     let (input, output) = cli::devices(&host, options.input.as_deref(), options.output.as_deref())?;
-    let input_config = audio::select_input_config(input.supported_input_configs()?)
-        .ok_or_else(|| io::Error::other("Input does not support 48000 Hz / 128 frames"))?;
+    let (input_config, routing) = cli_input_config(&input, options)?;
     let output_config = audio::select_output_config(output.supported_output_configs()?)
         .ok_or_else(|| io::Error::other("Output does not support 48000 Hz / 128 frames"))?;
     describe_audio(
@@ -80,10 +95,11 @@ fn run_cli(options: &cli::Options) -> Result<(), Box<dyn Error>> {
     let (mic_producer, mut mic_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
     let (mut speaker_producer, speaker_consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
     let (rx, mut mixer) = mixer::channels(crate::audio::BUFFER_FRAMES);
-    let monitor = network_mode.then(|| mixer.enable_local_monitor());
+    let monitor = network_mode.then(|| mixer.enable_local_sources(routing.mic_enabled()));
     let input_stream = streams::input(
         &input,
         &input_config,
+        routing,
         mic_producer,
         monitor,
         Arc::clone(&stats),
