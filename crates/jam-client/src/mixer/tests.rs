@@ -261,7 +261,12 @@ fn dual_local_controls_solos_and_tx_mute_are_independent() {
             );
             assert!(rx.push(1, &[0.125; RX_TARGET_SAMPLES + 1]));
             mixer.playback(&mut out, 2, &stats);
-            assert_eq!(out, [expected.tanh(); 2]);
+            // tanh can differ in its last bit between platform math implementations.
+            assert!(
+                out.iter()
+                    .all(|sample| (*sample - expected.tanh()).abs() <= f32::EPSILON)
+            );
+            assert_eq!(out[0], out[1]);
             assert_eq!(net.pop(), Ok(if tx_muted { 0.5 } else { 0.75 }));
         }
     }
