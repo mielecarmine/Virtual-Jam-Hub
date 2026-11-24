@@ -1,6 +1,145 @@
 # Virtual Jam — Real-Time Virtual Rehearsal Room in Rust
 
-## Ultra-low-latency networked audio system designed to let a band (up to 8 musicians) rehearse together remotely in real time. The primary engineering goal is to keep total end-to-end latency (Audio I/O + Codec + Network) below the 20–25 ms psychoacoustic threshold.
+## Quick Start for Beta Testers
+
+Virtual Jam lets up to **8 musicians** rehearse together remotely, with live audio,
+a personal headphone mix, and a shared metronome. It is free, open-source beta software.
+Low latency depends on your audio hardware, connection, and distance to other musicians;
+the engineering target is below 20–25 ms, not a guaranteed result.
+
+[Download a beta](https://github.com/mielecarmine/Virtual-Jam-Hub/releases) ·
+[Send beta feedback](https://github.com/mielecarmine/Virtual-Jam-Hub/issues/new?template=beta_feedback.md) ·
+[Interface preview](#interface-preview)
+
+### 1. Download and install
+
+Use **GitHub Releases**, including pre-releases (the `/releases/latest` shortcut can
+skip betas). The currently published beta is **1.0.5-beta**:
+
+| System | Download / availability | Installation and requirements |
+| --- | --- | --- |
+| Windows x64 | [Download `.exe` (1.0.5-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.5-beta/Virtual-Jam-1.0.5-beta-windows-x64-setup.exe) | Windows 10/11; run the installer, then open **Virtual Jam** from Start. Per-user installation. |
+| macOS Apple Silicon | [Download `.pkg` (1.0.5-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.5-beta/Virtual-Jam-1.0.5-beta-macos-arm64.pkg) | macOS 11+ on ARM64; open the package, launch **Virtual Jam** from Applications, and allow microphone access. |
+| Linux x64 client | `.deb` prepared for the next beta; not yet published in [Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases) | Ubuntu 22.04+ / compatible Debian-based x86_64 system (glibc 2.35+). Install with `sudo apt install ./Virtual-Jam-VERSION-linux-amd64.deb`; launch **Virtual Jam** or `virtual-jam`. |
+| Linux x64 standalone server | `.tar.gz` prepared for the next beta; not yet published in [Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases) | Linux x86_64, glibc 2.35+; no audio hardware required. See [server setup](deploy/README.md). |
+
+The active **1.0.6-beta** development branch includes the English interface (JAM-45)
+and Linux packaging (JAM-46). The published 1.0.5-beta installers predate those changes;
+their labels may differ from the preview below. Until the next release is published,
+Linux users can [build from source](CONTRIBUTING.md#3-build-prerequisites).
+Client and server must use compatible builds; update the whole room together.
+
+**Unsigned beta:** these installers have no commercial Windows/Apple code signing or
+Apple notarization. SmartScreen or Gatekeeper may ask for explicit approval. Only approve
+an installer you trust from this repository's Releases page; do not disable system-wide
+protections. The macOS ad-hoc signature does not certify the author's identity.
+Check downloaded files against the release's `SHA256SUMS.txt`.
+
+### 2. Prepare your audio hardware
+
+- **Wired headphones are required.** Avoid speakers (acoustic feedback) and Bluetooth
+  headphones (latency can exceed 100 ms).
+- Use an audio interface with input and output at **48 kHz**. Start with **128 frames**;
+  try **64** for lower latency or **256** if you hear clicks, when supported by the driver.
+- Windows: install the interface manufacturer's **ASIO** driver for low latency;
+  **WASAPI** is also available. macOS: **CoreAudio**. Linux: **ALSA**, including
+  PipeWire through ALSA `default` / `pipewire` devices.
+- Connect your instrument, choose its **Instrument channel**, and optionally select a
+  separate **Microphone channel** for talkback. Leave the microphone disabled if unused.
+  If you use the app's local monitoring, disable hardware direct monitoring to avoid
+  hearing your input twice.
+
+### 3. Join a room or host a test
+
+**Shared server:** obtain a compatible server's **IP address and UDP port** from your
+test organizer. There is no guaranteed public test room. Open **Virtual Jam**, enter
+your **Nickname** and **Server address (IP:port)** (for example `192.168.1.10:7777` on
+a LAN, or `[IPv6]:7777`), choose **Backend**, **Input**, **Output** and **Buffer**, then
+click **Connect**. Ask another musician to join the same server: you hear remote peers
+and your locally monitored input. One server hosts one room of at most **8 musicians**.
+
+**LAN / self-hosted server:** on a Linux host, extract the standalone archive when
+available and run `./jam-server`. Alternatively, from a source checkout with
+[build prerequisites](CONTRIBUTING.md#3-build-prerequisites):
+
+```sh
+cargo run --locked --release -p jam-server
+```
+
+Keep the server running and enter its LAN IP in every client's server field. Use
+`127.0.0.1:7777` only when client and server run on the same computer. The server listens
+on **UDP 7777** by default; allow that UDP port in the host firewall and, for a VPS,
+the provider's firewall. For a server behind a home router, remote access also requires
+UDP port forwarding. See [Linux deployment](deploy/README.md) for a persistent service.
+P2P routes are negotiated automatically; the SFU server is still needed to join the room
+and provides relay fallback.
+
+**Beta security:** audio/control traffic has **no encryption or authentication**.
+Use trusted participants and a trusted LAN or VPN. An exposed server address does not
+provide a private or access-controlled room.
+
+**Local test without a server:** with wired headphones, run a 30-second hardware loopback
+from a source checkout:
+
+```sh
+cargo run --locked --release -p jam-client -- --seconds 30
+```
+
+Or run the installed client with `--seconds 30`: on Linux, `virtual-jam --seconds 30`;
+on Windows PowerShell,
+`& "$env:LOCALAPPDATA\Programs\Virtual Jam\jam-client.exe" --seconds 30`;
+on macOS, `"/Applications/Virtual Jam.app/Contents/MacOS/jam-client" --seconds 30`.
+This plays your input into your headphones without using the network. It uses the system
+default devices and 128 frames at 48 kHz; CLI device options are described in
+[Local Hardware Audio Loopback](#7-local-hardware-audio-loopback--jam-8).
+
+### 4. Help improve the beta
+
+Use the [Beta feedback issue template](https://github.com/mielecarmine/Virtual-Jam-Hub/issues/new?template=beta_feedback.md)
+to report what worked, clicks/dropouts, connection problems, or unexpected latency.
+Include app/server versions, OS, backend, interface, buffer, number of musicians,
+P2P/SFU routes and the displayed **E2E Latency**. That value is a one-way **estimate**;
+it does not measure remote hardware or replace an external latency measurement.
+
+Sharing diagnostics is optional:
+
+- **Remote report (off by default):** before connecting, select
+  **Share anonymous end-of-session technical report (beta)** to send aggregate technical
+  metrics on disconnect. It sends no audio or nicknames. See the
+  [privacy notice](#privacy--telemetry-notice) for report contents and source-IP handling.
+- **Manual feedback:** pre-release installers write a local `telemetry-*.txt` file during
+  GUI sessions, next to `client.toml`. The GUI shows that path under **Configuration:**.
+  Disconnect to finish the log, then attach it to the issue or paste relevant summary
+  lines. Source builds need `--features jam-client/telemetry-log` to enable these local
+  logs. Local files remain on your device unless you share them; review anything you
+  attach to a public issue and remove private details or credentials.
+
+### Interface preview
+
+![Virtual Jam English setup screen with nickname, server address, audio backend, input and output, instrument and microphone channels, 128-frame buffer, optional report checkbox, and Connect button](docs/images/beta-setup.jpg)
+
+*Actual Windows setup screen from the active pre-release branch. No session is running;
+the mixer and metronome appear after connecting. Older published betas may differ.*
+
+| Area in the connected interface | What to look for |
+| --- | --- |
+| **Your Headphone Mix** | Multi-channel mixer with a VU/peak meter, dB gain, **M · Mute**, and **S · Solo** for each musician, plus **Local Instrument** and optional **Local Microphone**. These controls change your headphone mix; **Mute Mic (Net)** silences outgoing talkback. |
+| Route indicators | The telemetry bar shows `Peer N: P2P` or `Peer N: SFU` for each remote musician. Mixed routes can coexist; no manual mode selection is needed. |
+| **E2E Latency** | Estimated one-way budget: **Optimal** below 20 ms, **Borderline** at 20–25 ms, **Tempo-Drag Risk** above 25 ms. Hover for the breakdown; `—` means an estimate is unavailable. |
+| **Metronome & Tempo-Drag Prevention** | **Room Metronome On/Off**, **BPM**, beats per bar, and **Reference / Tempo Leader**. Room controls are shared; click volume and mute are local. |
+
+For engineering details, building, and protocol documentation, continue below or read
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+<!-- Release maintenance: when 1.0.6-beta is published, replace the download table with
+direct links to all four assets from that release and its SHA256SUMS.txt. Asset names:
+Virtual-Jam-VERSION-windows-x64-setup.exe, Virtual-Jam-VERSION-macos-arm64.pkg,
+Virtual-Jam-VERSION-linux-amd64.deb, Virtual-Jam-Server-VERSION-linux-amd64.tar.gz.
+Verify against the published release, not just the workflow artifacts. Refresh the setup
+screenshot when GUI labels change; add a connected-session screenshot showing the mixer,
+route indicators and metronome, using test nicknames and no private endpoints. -->
+
+## Technical Documentation
 
 ### 1. System Architecture
 
