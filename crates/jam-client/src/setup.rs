@@ -57,19 +57,21 @@ impl Preferences {
         self.input_routing()?;
         if self.nickname.trim().is_empty() || self.nickname.len() > jam_protocol::NICKNAME_CAPACITY
         {
-            return Err(io::Error::other(
-                "Il nickname deve contenere 1–32 byte UTF-8.",
-            ));
+            return Err(io::Error::other("Nickname must contain 1–32 UTF-8 bytes."));
         }
         if !BUFFER_SIZES.contains(&self.buffer_frames) {
-            return Err(io::Error::other("Scegli un buffer di 64, 128 o 256 frame."));
+            return Err(io::Error::other(
+                "Choose a buffer of 64, 128 or 256 frames.",
+            ));
         }
-        let endpoint: SocketAddr = self.server.trim().parse().map_err(|_| {
-            io::Error::other("Inserisci il server come IP:porta oppure [IPv6]:porta.")
-        })?;
+        let endpoint: SocketAddr = self
+            .server
+            .trim()
+            .parse()
+            .map_err(|_| io::Error::other("Enter the server as IP:port or [IPv6]:port."))?;
         if endpoint.port() == 0 || endpoint.ip().is_unspecified() {
             return Err(io::Error::other(
-                "Specifica un IP di destinazione e una porta non zero.",
+                "Specify a destination IP address and a nonzero port.",
             ));
         }
         Ok(endpoint)
@@ -143,7 +145,7 @@ pub fn config_path() -> io::Result<PathBuf> {
     }
     directories::ProjectDirs::from("", "", "virtual-jam")
         .map(|dirs| dirs.config_dir().join("client.toml"))
-        .ok_or_else(|| io::Error::other("Directory di configurazione locale non disponibile."))
+        .ok_or_else(|| io::Error::other("Local configuration directory unavailable."))
 }
 
 #[derive(Clone, Debug)]
@@ -223,10 +225,10 @@ impl Catalog {
         let routing = preferences.input_routing()?;
         let input = self
             .selected_input(preferences)
-            .ok_or_else(|| io::Error::other("Dispositivo di ingresso non disponibile."))?;
+            .ok_or_else(|| io::Error::other("Input device unavailable."))?;
         if routing.required_channels() > input.max_channels {
             return Err(io::Error::other(
-                "Canali selezionati non disponibili su questo ingresso a 48 kHz.",
+                "Selected channels unavailable on this input at 48 kHz.",
             ));
         }
         Ok(())

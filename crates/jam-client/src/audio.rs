@@ -90,10 +90,10 @@ pub struct InputRouting {
 impl InputRouting {
     pub fn new(instrument: u16, mic: Option<u16>) -> Result<Self, &'static str> {
         if instrument == 0 || mic == Some(0) {
-            return Err("I canali audio devono essere maggiori di zero.");
+            return Err("Audio channels must be greater than zero.");
         }
         if mic == Some(instrument) {
-            return Err("Strumento e microfono devono usare canali diversi.");
+            return Err("Instrument and microphone must use different channels.");
         }
         Ok(Self {
             instrument: instrument - 1,

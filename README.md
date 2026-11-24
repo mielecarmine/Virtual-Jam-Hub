@@ -567,9 +567,9 @@ Initial volume is 0 dB with Mute and Solo off. The mixer does not wait for local
 it immediately plays available samples on all output channels, applying gain/Mute/Solo and
 shared soft clipping. Controls reset on each new session; the meter stays pre-fader.
 
-The GUI shows **Strumento locale** and, when enabled, **Microfono locale**, with independent
+The GUI shows **Local Instrument** and, when enabled, **Local Microphone**, with independent
 pre-fader meters, headphone gain (-60 to +6 dB), Mute and Solo. These controls affect only
-headphone monitoring. **Mute Mic (Rete)** independently removes the microphone from TX;
+headphone monitoring. **Mute Mic (Net)** independently removes the microphone from TX;
 it does not mute the instrument or the local microphone monitor. It resets to off each
 session. The TX ring receives the 1:1 sum of instrument and unmuted microphone, with no
 additional buffering or gain stage; balance the sources using the interface's physical

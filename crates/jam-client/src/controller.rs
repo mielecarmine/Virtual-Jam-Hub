@@ -150,13 +150,13 @@ impl Session {
             )
             .ok_or_else(|| {
                 io::Error::other(
-                    "Input incompatibile con i canali selezionati, 48 kHz e il buffer scelto.",
+                    "Input incompatible with the selected channels, 48 kHz and the selected buffer.",
                 )
             })?;
             let output_config =
                 audio::select_output_config_for_buffer(output.supported_output_configs()?, frames)
                     .ok_or_else(|| {
-                        io::Error::other("Output incompatibile con 48 kHz e il buffer scelto.")
+                        io::Error::other("Output incompatible with 48 kHz and the selected buffer.")
                     })?;
             let sample_rate_hz = output_config.stream.sample_rate.0;
             let stats = Arc::new(Stats::default());
@@ -322,7 +322,7 @@ impl ActiveSession for Session {
     fn poll(&mut self) -> io::Result<bool> {
         if self.stats.has_hardware_errors() {
             return Err(io::Error::other(
-                "Errore audio: verifica scheda, driver e buffer.",
+                "Audio error: check the audio interface, driver and buffer.",
             ));
         }
         self.network
@@ -380,7 +380,7 @@ fn control_loop<S: ActiveSession>(
                 Command::Metronome(config) => {
                     if let Some(active) = &mut session {
                         if let Err(error) = active.update_metronome(config) {
-                            send(Event::Error(format!("Metronomo: {error}")));
+                            send(Event::Error(format!("Metronome: {error}")));
                         }
                     }
                 }
