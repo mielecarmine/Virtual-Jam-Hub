@@ -20,7 +20,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Ok(preferences) => (preferences, None),
         Err(error) => (
             Preferences::default(),
-            Some(format!("Configurazione non caricata: {error}")),
+            Some(format!("Configuration not loaded: {error}")),
         ),
     };
     let controller = Controller::start(preferences.clone(), path.clone())?;
@@ -72,7 +72,7 @@ struct AppState {
 impl AppState {
     fn command(&mut self, command: Command) -> bool {
         if self.controller.commands.send(command).is_err() {
-            self.error = Some("Il controller si è arrestato. Riavvia l’applicazione.".into());
+            self.error = Some("The controller has stopped. Restart the application.".into());
             return false;
         }
         true
@@ -128,7 +128,7 @@ impl AppState {
         device_combo(
             ui,
             "input",
-            "Ingresso",
+            "Input",
             &mut self.preferences.input,
             &self.catalog.inputs,
         );
@@ -143,15 +143,15 @@ impl AppState {
         device_combo(
             ui,
             "output",
-            "Uscita",
+            "Output",
             &mut self.preferences.output,
             &self.catalog.outputs,
         );
-        ui.label("Buffer (frame a 48 kHz)");
+        ui.label("Buffer (frames at 48 kHz)");
         let supported = self.catalog.buffers(&self.preferences);
         egui::ComboBox::from_id_salt("buffer")
             .width(350.0)
-            .selected_text(format!("{} frame", self.preferences.buffer_frames))
+            .selected_text(format!("{} frames", self.preferences.buffer_frames))
             .show_ui(ui, |ui| {
                 for frames in setup::BUFFER_SIZES {
                     let available = supported.contains(&frames);
@@ -159,7 +159,7 @@ impl AppState {
                         ui.selectable_value(
                             &mut self.preferences.buffer_frames,
                             frames,
-                            format!("{frames} frame · {:.2} ms", f64::from(frames) / 48.0),
+                            format!("{frames} frames · {:.2} ms", f64::from(frames) / 48.0),
                         );
                     });
                 }
@@ -167,7 +167,7 @@ impl AppState {
         if !supported.contains(&self.preferences.buffer_frames) {
             ui.colored_label(
                 egui::Color32::YELLOW,
-                "Buffer non disponibile per questa coppia di dispositivi a 48 kHz.",
+                "Buffer unavailable for this device pair at 48 kHz.",
             );
         }
     }
@@ -176,42 +176,37 @@ impl AppState {
         let previous = self.preferences.clone();
         let idle = self.phase == Phase::Disconnected && !self.disconnecting;
         ui.add_enabled_ui(idle, |ui| {
-            ui.heading("La tua sessione");
+            ui.heading("Your Session");
             ui.label("Nickname");
             ui.add(
                 egui::TextEdit::singleline(&mut self.preferences.nickname)
                     .desired_width(f32::INFINITY),
             );
-            ui.label("Indirizzo server (IP:porta)");
+            ui.label("Server address (IP:port)");
             ui.add(
                 egui::TextEdit::singleline(&mut self.preferences.server)
-                    .hint_text("127.0.0.1:7777 oppure [::1]:7777")
+                    .hint_text("127.0.0.1:7777 or [::1]:7777")
                     .desired_width(f32::INFINITY),
             );
             ui.add_space(16.0);
-            ui.heading("Hardware audio");
+            ui.heading("Audio Hardware");
             ui.label("Backend");
             egui::ComboBox::from_id_salt("host")
                 .width(350.0)
-                .selected_text(
-                    self.preferences
-                        .host
-                        .as_deref()
-                        .unwrap_or("Predefinito di sistema"),
-                )
+                .selected_text(self.preferences.host.as_deref().unwrap_or("System default"))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.preferences.host, None, "Predefinito di sistema");
+                    ui.selectable_value(&mut self.preferences.host, None, "System default");
                     for host in &self.catalog.hosts {
                         ui.selectable_value(&mut self.preferences.host, Some(host.clone()), host);
                     }
                 });
             ui.add_enabled_ui(!self.loading, |ui| self.audio_devices(ui));
             ui.small(
-                "Se il driver non dichiara i buffer supportati, \
-                 la verifica avviene alla connessione.",
+                "If the driver does not report supported buffer sizes, \
+                 compatibility is checked when connecting.",
             );
             if ui
-                .add_enabled(!self.loading, egui::Button::new("Aggiorna dispositivi"))
+                .add_enabled(!self.loading, egui::Button::new("Refresh devices"))
                 .clicked()
             {
                 self.refresh();
@@ -244,20 +239,20 @@ impl AppState {
             return;
         }
         ui.separator();
-        ui.heading("Il tuo mix in cuffia");
+        ui.heading("Your Headphone Mix");
         let Some(view) = &self.mixer else {
-            ui.label("In attesa della lista dei musicisti…");
+            ui.label("Waiting for musician list…");
             return;
         };
         if view.peers.is_empty() {
-            ui.label("Nessun altro musicista nella stanza.");
+            ui.label("No other musicians in the room.");
         }
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(110.0);
                     ui.vertical_centered(|ui| {
-                        ui.strong("Strumento locale");
+                        ui.strong("Local Instrument");
                         self.meters[0].show(ui, &view.stats.input_peak);
                         monitoring_controls(ui, &view.local_control);
                     });
@@ -267,12 +262,12 @@ impl AppState {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.set_width(110.0);
                             ui.vertical_centered(|ui| {
-                                ui.strong("Microfono locale");
+                                ui.strong("Local Microphone");
                                 self.meters[jam_protocol::MAX_PEERS + 1]
                                     .show(ui, &view.stats.mic_peak);
                                 monitoring_controls(ui, &view.local_mic_control);
                                 let mut muted = view.stats.mic_tx_mute.load(Ordering::Relaxed);
-                                if ui.toggle_value(&mut muted, "Mute Mic (Rete)").changed() {
+                                if ui.toggle_value(&mut muted, "Mute Mic (Net)").changed() {
                                     view.stats.mic_tx_mute.store(muted, Ordering::Relaxed);
                                 }
                             });
@@ -303,14 +298,14 @@ impl AppState {
             return;
         }
         ui.separator();
-        ui.heading("Metronomo & Prevenzione Tempo-Drag");
+        ui.heading("Metronome & Tempo-Drag Prevention");
         let Some(state) = self.metronome else {
-            ui.label("In attesa dello stato del metronomo di stanza…");
+            ui.label("Waiting for room metronome state…");
             return;
         };
         let mut config = state.config;
         ui.add_enabled_ui(!self.disconnecting, |ui| {
-            ui.checkbox(&mut config.enabled, "Metronomo On/Off · stanza");
+            ui.checkbox(&mut config.enabled, "Room Metronome On/Off");
             ui.horizontal_wrapped(|ui| {
                 ui.label("BPM");
                 ui.add(egui::DragValue::new(&mut config.bpm).range(30..=300));
@@ -326,9 +321,9 @@ impl AppState {
                         }
                     });
             });
-            ui.small("Battiti per misura; i BPM contano gli impulsi del click (anche in 6/8).");
+            ui.small("Beats per bar; BPM counts click pulses (including in 6/8).");
             if let Some(view) = &self.mixer {
-                ui.label("Riferimento / Tempo Leader");
+                ui.label("Reference / Tempo Leader");
                 egui::ComboBox::from_id_salt("tempo_leader")
                     .selected_text(leader_label(
                         config.leader_peer_id,
@@ -336,15 +331,11 @@ impl AppState {
                         &self.preferences.nickname,
                     ))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut config.leader_peer_id,
-                            0,
-                            "Clock Assoluto (Stanza)",
-                        );
+                        ui.selectable_value(&mut config.leader_peer_id, 0, "Absolute Clock (Room)");
                         ui.selectable_value(
                             &mut config.leader_peer_id,
                             view.local_peer_id,
-                            format!("{} (tu)", self.preferences.nickname),
+                            format!("{} (you)", self.preferences.nickname),
                         );
                         for peer in &view.peers {
                             ui.selectable_value(
@@ -362,11 +353,9 @@ impl AppState {
         if config != state.config {
             self.command(Command::Metronome(config));
         }
-        ui.small(
-            "I controlli di stanza si aggiornano alla conferma del server per tutti i musicisti.",
-        );
+        ui.small("Room controls update for all musicians once confirmed by the server.");
         if tempo_drag_hint(self.telemetry.latency, state.config.enabled) {
-            ui.label("Latenza oltre 25 ms: attiva il Metronomo di stanza o scegli un Tempo Leader per evitare il tempo-drag.");
+            ui.label("Latency above 25 ms: enable the Room Metronome or choose a Tempo Leader to prevent tempo-drag.");
         }
     }
 
@@ -379,12 +368,12 @@ impl AppState {
         ui.add_space(16.0);
         ui.separator();
         let label = if self.disconnecting {
-            "Disconnessione…"
+            "Disconnecting…"
         } else {
             match self.phase {
-                Phase::Disconnected => "Disconnesso",
-                Phase::Connecting => "Connessione al server…",
-                Phase::Connected => "Connesso · audio UDP attivo",
+                Phase::Disconnected => "Disconnected",
+                Phase::Connecting => "Connecting to server…",
+                Phase::Connected => "Connected · UDP audio active",
             }
         };
         ui.strong(label);
@@ -403,7 +392,7 @@ impl AppState {
             if ui
                 .add_enabled(
                     !self.loading && compatible && validation.is_ok(),
-                    egui::Button::new("Connetti").min_size(egui::vec2(140.0, 36.0)),
+                    egui::Button::new("Connect").min_size(egui::vec2(140.0, 36.0)),
                 )
                 .clicked()
             {
@@ -416,7 +405,7 @@ impl AppState {
         } else if ui
             .add_enabled(
                 !self.disconnecting,
-                egui::Button::new("Disconnetti").min_size(egui::vec2(140.0, 36.0)),
+                egui::Button::new("Disconnect").min_size(egui::vec2(140.0, 36.0)),
             )
             .clicked()
         {
@@ -429,11 +418,11 @@ fn telemetry_opt_in(ui: &mut egui::Ui, share_telemetry: &mut bool) {
     ui.add_space(12.0);
     ui.checkbox(
         share_telemetry,
-        "Condividi report tecnico anonimo di fine sessione (beta)",
+        "Share anonymous end-of-session technical report (beta)",
     );
     ui.small(
-        "Opt-in: invia solo versione, OS, backend audio, buffer e statistiche RTT/jitter/loss \
-         al server beta (185.198.245.40) alla disconnessione. Nessun audio o dato personale.",
+        "Opt-in: sends only version, OS, audio backend, buffer size and RTT/jitter/loss statistics \
+         to the beta server (185.198.245.40) on disconnect. No audio or personal data.",
     );
 }
 
@@ -441,21 +430,21 @@ fn meter_label(beats: u8) -> String {
     match beats {
         2..=4 => format!("{beats}/4"),
         6 => "6/8".into(),
-        _ => format!("{beats} battiti"),
+        _ => format!("{beats} beats"),
     }
 }
 
 fn leader_label(id: u8, view: &MixerView, nickname: &str) -> String {
     if id == 0 {
-        "Clock Assoluto (Stanza)".into()
+        "Absolute Clock (Room)".into()
     } else if id == view.local_peer_id {
-        format!("{nickname} (tu)")
+        format!("{nickname} (you)")
     } else {
         view.peers
             .iter()
             .find(|peer| peer.peer_id == id)
             .map_or_else(
-                || format!("Peer {id} (aggiornamento stanza…)"),
+                || format!("Peer {id} (updating room…)"),
                 |peer| {
                     String::from_utf8_lossy(&peer.nickname[..usize::from(peer.nickname_len)])
                         .into_owned()
@@ -490,14 +479,14 @@ fn click_monitoring(
             };
             let text = if index == 0 { "◆" } else { "●" };
             ui.colored_label(color, text)
-                .on_hover_text(format!("Battito {}", index + 1));
+                .on_hover_text(format!("Beat {}", index + 1));
         }
     });
     let mut db = gain_to_db(f32::from_bits(controls.gain.load(Ordering::Relaxed)));
     if ui
         .add(
             egui::Slider::new(&mut db, -60.0..=6.0)
-                .text("Volume click locale")
+                .text("Local click volume")
                 .suffix(" dB"),
         )
         .changed()
@@ -507,25 +496,25 @@ fn click_monitoring(
             .store(db_to_gain(db).to_bits(), Ordering::Relaxed);
     }
     let mut mute = controls.mute.load(Ordering::Relaxed);
-    if ui.toggle_value(&mut mute, "Mute Click · locale").changed() {
+    if ui.toggle_value(&mut mute, "Mute Click · local").changed() {
         controls.mute.store(mute, Ordering::Relaxed);
     }
     let delay_ms = f64::from(controls.phase_delay_samples.load(Ordering::Relaxed)) * 1000.0
         / f64::from(jam_protocol::SAMPLE_RATE);
-    ui.small(format!("Ritardo click Tempo Leader: ~{delay_ms:.1} ms")).on_hover_text(
-        "Stima: RTT P2P / 2 oppure RTT SFU completo + target jitter del Leader + riserva SPSC + codec + audio I/O locale. Hardware remoto stimato con quello locale.",
+    ui.small(format!("Tempo Leader click delay: ~{delay_ms:.1} ms")).on_hover_text(
+        "Estimate: P2P RTT / 2 or full SFU RTT + leader jitter target + SPSC reserve + codec + local audio I/O. Remote hardware is estimated using local hardware.",
     );
 }
 
 fn channel_combos(ui: &mut egui::Ui, preferences: &mut Preferences, max_channels: u16) {
     let label = |channel: u16| {
         if channel == 0 || channel > max_channels {
-            format!("Canale {channel} (non disponibile)")
+            format!("Channel {channel} (unavailable)")
         } else {
-            format!("Canale {channel}")
+            format!("Channel {channel}")
         }
     };
-    ui.label("Canale strumento");
+    ui.label("Instrument channel");
     egui::ComboBox::from_id_salt("instrument_channel")
         .width(350.0)
         .selected_text(label(preferences.instrument_channel))
@@ -540,16 +529,16 @@ fn channel_combos(ui: &mut egui::Ui, preferences: &mut Preferences, max_channels
                 });
             }
         });
-    ui.label("Canale microfono");
+    ui.label("Microphone channel");
     egui::ComboBox::from_id_salt("mic_channel")
         .width(350.0)
         .selected_text(
             preferences
                 .mic_channel
-                .map_or_else(|| "Disabilitato".into(), label),
+                .map_or_else(|| "Disabled".into(), label),
         )
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut preferences.mic_channel, None, "Disabilitato");
+            ui.selectable_value(&mut preferences.mic_channel, None, "Disabled");
             for channel in 1..=max_channels {
                 ui.add_enabled_ui(preferences.instrument_channel != channel, |ui| {
                     ui.selectable_value(
@@ -573,16 +562,16 @@ fn device_combo(
     let missing = selected
         .as_ref()
         .is_some_and(|name| !devices.iter().any(|d| &d.name == name));
-    let text = selected.as_deref().unwrap_or("Predefinito di sistema");
+    let text = selected.as_deref().unwrap_or("System default");
     egui::ComboBox::from_id_salt(id)
         .width(350.0)
         .selected_text(if missing {
-            format!("{text} (non disponibile)")
+            format!("{text} (unavailable)")
         } else {
             text.into()
         })
         .show_ui(ui, |ui| {
-            ui.selectable_value(selected, None, "Predefinito di sistema");
+            ui.selectable_value(selected, None, "System default");
             for device in devices {
                 ui.selectable_value(selected, Some(device.name.clone()), &device.name);
             }
@@ -605,7 +594,7 @@ impl eframe::App for AppState {
                     }
                     ui.label(format!("Jitter: {:.1} ms · Packet Loss: {:.1}% · Jitter Buffer: {:.1} ms",
                         self.telemetry.jitter_ms, self.telemetry.loss_percent, self.telemetry.buffer_ms))
-                        .on_hover_text("Ricezione: jitter massimo tra peer; perdita cumulativa dopo una finestra di riordino di 64 pacchetti; buffer = massimo audio codificato attualmente in coda, esclusi buffer hardware e SPSC.");
+                        .on_hover_text("Receive: maximum jitter across peers; cumulative packet loss after a 64-packet reorder window; buffer = maximum encoded audio currently queued, excluding hardware and SPSC buffers.");
                 } else { ui.label("Jitter: — · Packet Loss: — · Jitter Buffer: —"); }
                 latency_indicator(ui, if self.phase == Phase::Connected { self.telemetry.latency } else { None });
             });
@@ -613,17 +602,17 @@ impl eframe::App for AppState {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Virtual Jam");
-                ui.label("Collega il tuo strumento e raggiungi la band.");
+                ui.label("Connect your instrument and join the band.");
                 ui.small(
-                    "Usa le cuffie. Gain, Mute e Solo regolano il tuo ascolto. \
-                     Mute Mic (Rete) esclude il microfono dal segnale inviato alla band.",
+                    "Use headphones. Gain, Mute and Solo adjust your headphone mix. \
+                     Mute Mic (Net) removes the microphone from the signal sent to the band.",
                 );
                 ui.add_space(16.0);
                 self.setup(ui);
                 if self.loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Ricerca dispositivi…");
+                        ui.label("Scanning devices…");
                     });
                 }
                 self.connection(ui);
@@ -635,13 +624,13 @@ impl eframe::App for AppState {
                 if let Some(error) = &self.save_error {
                     ui.colored_label(
                         egui::Color32::LIGHT_RED,
-                        format!("Preferenze non salvate: {error}"),
+                        format!("Preferences not saved: {error}"),
                     );
                 } else if self.saved {
-                    ui.small("Preferenze salvate.");
+                    ui.small("Preferences saved.");
                 }
                 ui.add_space(10.0);
-                ui.small(format!("Configurazione: {}", self.path.display()));
+                ui.small(format!("Configuration: {}", self.path.display()));
             });
         });
         if self
@@ -658,7 +647,7 @@ impl eframe::App for AppState {
 fn latency_indicator(ui: &mut egui::Ui, budget: Option<crate::network::telemetry::LatencyBudget>) {
     use crate::network::telemetry::LatencyClass;
     let Some(budget) = budget else {
-        ui.label("Latenza E2E: —");
+        ui.label("E2E Latency: —");
         return;
     };
     let color = match budget.class {
@@ -668,30 +657,30 @@ fn latency_indicator(ui: &mut egui::Ui, budget: Option<crate::network::telemetry
         None => egui::Color32::GRAY,
     };
     let text = budget.total_one_way_ms.map_or_else(
-        || "Latenza E2E: — (RTT non disponibile)".into(),
+        || "E2E Latency: — (RTT unavailable)".into(),
         |ms| {
             format!(
-                "Latenza E2E: ~{ms:.1} ms · {}",
+                "E2E Latency: ~{ms:.1} ms · {}",
                 budget.class.map_or("—", LatencyClass::label)
             )
         },
     );
     ui.colored_label(color, text).on_hover_ui(|ui| {
-        ui.label(format!("Audio I/O: {:.1} ms (cattura richiesta + ultimo blocco output; fallback al buffer richiesto)", budget.audio_io_ms));
-        ui.label(format!("Codec: {:.1} ms (frame Opus + lookahead encoder)", budget.codec_ms));
+        ui.label(format!("Audio I/O: {:.1} ms (requested capture + last output block; falls back to the requested buffer)", budget.audio_io_ms));
+        ui.label(format!("Codec: {:.1} ms (Opus frame + encoder lookahead)", budget.codec_ms));
         ui.label(budget.network_one_way_ms.map_or_else(
-            || "Rete: — (RTT non disponibile)".into(),
-            |ms| format!("Rete: {ms:.1} ms (RTT rotta / 2)"),
+            || "Network: — (RTT unavailable)".into(),
+            |ms| format!("Network: {ms:.1} ms (route RTT / 2)"),
         ));
-        ui.label(format!("Jitter/RX Buffer: {:.1} ms (massimo tra peer + riserva SPSC mixer)", budget.rx_buffer_ms));
+        ui.label(format!("Jitter/RX Buffer: {:.1} ms (maximum across peers + mixer SPSC reserve)", budget.rx_buffer_ms));
         ui.label(budget.headroom_ms.map_or_else(
-            || "Margine residuo: —".into(),
-            |ms| format!("Margine residuo rispetto a 25 ms: {ms:+.1} ms"),
+            || "Headroom relative to 25 ms: —".into(),
+            |ms| format!("Headroom relative to 25 ms: {ms:+.1} ms"),
         ));
-        ui.label("Ottimale <20 ms · Limite 20–25 ms · Rischio Tempo-Drag >25 ms");
-        ui.label("Stima one-way con audio I/O locale e rotta più lenta (P2P/SFU): l'hardware remoto non è misurato.");
+        ui.label("Optimal <20 ms · Borderline 20–25 ms · Tempo-Drag Risk >25 ms");
+        ui.label("One-way estimate using local audio I/O and the slowest route (P2P/SFU): remote hardware is not measured.");
         if budget.class == Some(LatencyClass::TempoDrag) {
-            ui.label("Consigliato un metronomo sincronizzato o un Tempo Leader come riferimento ritmico condiviso.");
+            ui.label("A synchronized metronome or a Tempo Leader is recommended as a shared rhythmic reference.");
         }
     });
 }
@@ -782,7 +771,7 @@ impl Meter {
         self.advance(value, ui.input(|input| input.time));
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(18.0, 100.0), egui::Sense::hover());
-        response.on_hover_text("Picco prima di fader e mute · dBFS · peak hold 1 s");
+        response.on_hover_text("Pre-fader, pre-mute peak · dBFS · 1 s peak hold");
         let painter = ui.painter();
         painter.rect_filled(rect, 2.0, egui::Color32::from_gray(25));
         let height =
