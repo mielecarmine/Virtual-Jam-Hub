@@ -19,6 +19,8 @@ jobs:
             platform: windows-x64
           - os: macos-15
             platform: macos-arm64
+          - os: ubuntu-22.04
+            platform: linux-amd64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     env:
@@ -34,7 +36,7 @@ jobs:
           components: rustfmt, clippy
       - name: Linux prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev cmake pkg-config
       - name: Windows prerequisites
         if: runner.os == 'Windows'
         shell: pwsh
@@ -74,10 +76,28 @@ jobs:
           path: |
             target/release/jam-client
             target/release/jam-client.exe
+            target/release/jam-server
+            target/release/jam-server.exe
           if-no-files-found: error
       - name: Linux installer and installation smoke test
         if: runner.os == 'Linux'
         run: bash packaging/linux.sh "$VERSION"
+      - name: Linux standalone server archive and smoke test
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          server_root=$(mktemp -d)
+          install -m755 target/release/jam-server "$server_root/jam-server"
+          mkdir -p "$server_root/deploy" dist
+          install -m755 deploy/install.sh "$server_root/deploy/install.sh"
+          install -m644 deploy/jam-server.service deploy/README.md "$server_root/deploy/"
+          install -m644 LICENSE "$server_root/LICENSE"
+          archive="dist/Virtual-Jam-Server-${VERSION}-linux-amd64.tar.gz"
+          tar -czf "$archive" -C "$server_root" jam-server deploy LICENSE
+          smoke_root=$(mktemp -d)
+          tar -xzf "$archive" -C "$smoke_root"
+          "$smoke_root/jam-server" --help
       - name: macOS installer and installation smoke test
         if: runner.os == 'macOS'
         run: bash packaging/macos.sh "$VERSION" "$(uname -m)"
@@ -116,9 +136,15 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           cd dist
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 2
-          test -f "Virtual-Jam-${TAG}-windows-x64-setup.exe"
-          test -f "Virtual-Jam-${TAG}-macos-arm64.pkg"
-          sha256sum * > SHA256SUMS.txt
+          assets=(
+            "Virtual-Jam-${TAG}-windows-x64-setup.exe"
+            "Virtual-Jam-${TAG}-macos-arm64.pkg"
+            "Virtual-Jam-${TAG}-linux-amd64.deb"
+            "Virtual-Jam-Server-${TAG}-linux-amd64.tar.gz"
+          )
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq "${#assets[@]}"
+          for asset in "${assets[@]}"; do test -s "$asset"; done
+          sha256sum "${assets[@]}" > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
           cd ..
           gh release create "$TAG" dist/* --verify-tag --prerelease --title "Virtual Jam $TAG" --notes-file packaging/RELEASE-NOTES.md

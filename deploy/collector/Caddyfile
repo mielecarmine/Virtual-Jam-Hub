@@ -1,0 +1,24 @@
+# Caddy reverse proxy for jam-collector on 185.198.245.40
+# Replace the site address with your DNS hostname if using Let's Encrypt ACME,
+# or keep https://185.198.245.40 with your provisioned TLS certificate.
+
+https://185.198.245.40 {
+    # Uncomment and point to your certificate if using an IP-based TLS cert:
+    # tls /etc/virtual-jam/tls/fullchain.pem /etc/virtual-jam/tls/privkey.pem
+
+    request_body {
+        max_size 2MB
+    }
+
+    @collector path /api/v1/logs /api/v1/logs/server /api/v1/logs/client /healthz
+    handle @collector {
+        reverse_proxy 127.0.0.1:8080 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+        }
+    }
+
+    handle {
+        respond "Not Found" 404
+    }
+}

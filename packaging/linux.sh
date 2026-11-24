@@ -12,7 +12,7 @@ Section: sound
 Priority: optional
 Architecture: amd64
 Maintainer: Carmine Miele <mielecarmine@users.noreply.github.com>
-Depends: libasound2, libc6 (>= 2.35), libgcc-s1, libstdc++6, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2, libgl1
+Depends: libasound2 | libasound2t64, libc6 (>= 2.35), libgcc-s1, libstdc++6, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2, libgl1
 Description: Virtual Jam real-time network audio client
  Low-latency UDP audio sessions and a per-peer desktop mixer.
 CONTROL

@@ -3,9 +3,18 @@ name = "jam-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Headless low-latency UDP SFU packet reflector and room signaling server for Virtual Jam"
 
 [dependencies]
 jam-protocol = { path = "../jam-protocol" }
+ctrlc = "3.4"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[dev-dependencies]
+jam-collector = { path = "../jam-collector" }
 
 [lints]
 workspace = true

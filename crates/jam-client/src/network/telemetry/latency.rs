@@ -26,9 +26,9 @@ impl LatencyClass {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Optimal => "Ottimale",
-            Self::Limit => "Limite",
-            Self::TempoDrag => "Rischio Tempo-Drag",
+            Self::Optimal => "Optimal",
+            Self::Limit => "Borderline",
+            Self::TempoDrag => "Tempo-Drag Risk",
         }
     }
 }

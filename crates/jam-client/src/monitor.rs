@@ -9,7 +9,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 #[derive(Clone, Copy)]
 struct Sample {
-    value: f32,
+    value: [f32; 2],
     position: u32,
 }
 
@@ -42,10 +42,14 @@ pub fn channel(capacity: usize) -> (Capture, Playback) {
 
 impl Capture {
     pub fn push(&mut self, value: f32) {
+        self.push_sources(value, 0.0);
+    }
+
+    pub fn push_sources(&mut self, instrument: f32, mic: f32) {
         // Advance even if full: playback must detect that queued samples are now stale.
         self.position = self.position.wrapping_add(1);
         let _ = self.ring.push(Sample {
-            value,
+            value: [instrument, mic],
             position: self.position,
         });
     }
@@ -71,7 +75,7 @@ impl Playback {
         }
     }
 
-    pub fn pop(&mut self) -> Option<f32> {
+    pub fn pop(&mut self) -> Option<[f32; 2]> {
         self.ring.pop().ok().map(|sample| sample.value)
     }
 }
@@ -85,13 +89,13 @@ mod tests {
         let (mut capture, mut playback) = channel(8);
         capture.position = u32::MAX - 2;
         for value in 0..6_u8 {
-            capture.push(f32::from(value));
+            capture.push_sources(f32::from(value), -f32::from(value));
         }
         capture.publish();
         playback.align(3);
-        assert_eq!(playback.pop(), Some(3.0));
-        assert_eq!(playback.pop(), Some(4.0));
-        assert_eq!(playback.pop(), Some(5.0));
+        assert_eq!(playback.pop(), Some([3.0, -3.0]));
+        assert_eq!(playback.pop(), Some([4.0, -4.0]));
+        assert_eq!(playback.pop(), Some([5.0, -5.0]));
         assert_eq!(playback.pop(), None);
     }
 
@@ -103,7 +107,34 @@ mod tests {
         // Model output running while capture is writing the next callback.
         capture.push(0.5);
         playback.align(1);
-        assert_eq!(playback.pop(), Some(0.25));
-        assert_eq!(playback.pop(), Some(0.5));
+        assert_eq!(playback.pop(), Some([0.25, 0.0]));
+        assert_eq!(playback.pop(), Some([0.5, 0.0]));
+    }
+
+    #[test]
+    fn paired_sources_recover_together_after_overflow_and_underflow() {
+        for frames in [64, 128, 256] {
+            let (mut capture, mut playback) = channel(frames);
+            assert_eq!(playback.pop(), None);
+            for _ in 0..frames {
+                capture.push_sources(0.75, -0.25);
+            }
+            // These newer frames cannot fit; queued pairs must be discarded as stale.
+            for _ in 0..frames {
+                capture.push_sources(-0.5, 0.125);
+            }
+            capture.publish();
+            playback.align(frames);
+            assert_eq!(playback.pop(), None);
+            for _ in 0..frames {
+                capture.push_sources(-0.5, 0.125);
+            }
+            capture.publish();
+            playback.align(frames);
+            for _ in 0..frames {
+                assert_eq!(playback.pop(), Some([-0.5, 0.125]));
+            }
+            assert_eq!(playback.pop(), None);
+        }
     }
 }

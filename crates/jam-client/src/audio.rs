@@ -15,6 +15,8 @@ const PREFILL_SAMPLES: usize = 2 * BUFFER_FRAMES;
 #[derive(Default)]
 pub struct Stats {
     pub input_peak: AtomicU32,
+    pub mic_peak: AtomicU32,
+    pub mic_tx_mute: AtomicBool,
     pub input_callbacks: AtomicU32,
     pub output_callbacks: AtomicU32,
     pub not_ready_samples: AtomicU32,
@@ -78,6 +80,37 @@ pub struct AudioConfig {
     pub format: SampleFormat,
 }
 
+/// Validated, zero-based routing, prepared before starting hardware callbacks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputRouting {
+    instrument: u16,
+    mic: Option<u16>,
+}
+
+impl InputRouting {
+    pub fn new(instrument: u16, mic: Option<u16>) -> Result<Self, &'static str> {
+        if instrument == 0 || mic == Some(0) {
+            return Err("Audio channels must be greater than zero.");
+        }
+        if mic == Some(instrument) {
+            return Err("Instrument and microphone must use different channels.");
+        }
+        Ok(Self {
+            instrument: instrument - 1,
+            mic: mic.map(|channel| channel - 1),
+        })
+    }
+
+    pub fn required_channels(self) -> u16 {
+        self.instrument.max(self.mic.unwrap_or(0)) + 1
+    }
+
+    pub fn mic_enabled(self) -> bool {
+        self.mic.is_some()
+    }
+}
+
+#[allow(dead_code)] // Compatibility selector for the default mono routing.
 pub fn select_input_config(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
 ) -> Option<AudioConfig> {
@@ -94,24 +127,33 @@ pub fn select_input_config_for_buffer(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
     frames: u32,
 ) -> Option<AudioConfig> {
-    select_config_for_buffer(configs, frames, false)
+    select_input_config_for_channels(configs, frames, 1)
+}
+
+pub fn select_input_config_for_channels(
+    configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+    frames: u32,
+    required_channels: u16,
+) -> Option<AudioConfig> {
+    select_config_for_buffer(configs, frames, false, required_channels.max(1))
 }
 
 pub fn select_output_config_for_buffer(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
     frames: u32,
 ) -> Option<AudioConfig> {
-    select_config_for_buffer(configs, frames, true)
+    select_config_for_buffer(configs, frames, true, 1)
 }
 
 fn select_config_for_buffer(
     configs: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
     frames: u32,
     output: bool,
+    required_channels: u16,
 ) -> Option<AudioConfig> {
     configs
         .filter(|config| {
-            config.channels() > 0
+            config.channels() >= required_channels
                 && config.min_sample_rate().0 <= SAMPLE_RATE
                 && config.max_sample_rate().0 >= SAMPLE_RATE
                 && match config.buffer_size() {
@@ -138,10 +180,11 @@ fn select_config_for_buffer(
         })
 }
 
-/// Keep channel 1 as the mono instrument signal. Drop whole frames on overflow.
+/// Capture independent local sources and one mono TX mix. Drop whole frames on overflow.
 pub fn capture<T: Sample>(
     data: &[T],
     channels: usize,
+    routing: InputRouting,
     mic_to_net: &mut Producer<f32>,
     mut monitor: Option<&mut crate::monitor::Capture>,
     stats: &Stats,
@@ -150,20 +193,26 @@ pub fn capture<T: Sample>(
 {
     stats.input_callbacks.fetch_add(1, Ordering::Relaxed);
     // ALSA may deliver part of the hardware buffer, or coalesce several periods.
-    if channels == 0 || data.len() % channels != 0 {
+    if channels < usize::from(routing.required_channels()) || data.len() % channels != 0 {
         stats.wrong_buffer_sizes.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let mut peak = 0.0_f32;
+    let mut mic_peak = 0.0_f32;
+    let mic_tx_mute = stats.mic_tx_mute.load(Ordering::Relaxed);
     for frame in data.chunks_exact(channels) {
-        let value = frame[0].to_sample::<f32>();
-        if value.is_finite() {
-            peak = peak.max(value.abs());
-        }
+        let finite = |value: f32| if value.is_finite() { value } else { 0.0 };
+        let value = finite(frame[usize::from(routing.instrument)].to_sample::<f32>());
+        let mic = routing.mic.map_or(0.0, |index| {
+            finite(frame[usize::from(index)].to_sample::<f32>())
+        });
+        peak = peak.max(value.abs());
+        mic_peak = mic_peak.max(mic.abs());
         if let Some(monitor) = &mut monitor {
-            monitor.push(value);
+            monitor.push_sources(value, mic);
         }
-        if mic_to_net.push(value).is_err() {
+        let tx = if mic_tx_mute { value } else { value + mic };
+        if mic_to_net.push(tx).is_err() {
             stats.input_overflows.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -173,6 +222,9 @@ pub fn capture<T: Sample>(
     stats
         .input_peak
         .fetch_max(peak.to_bits(), Ordering::Relaxed);
+    stats
+        .mic_peak
+        .fetch_max(mic_peak.to_bits(), Ordering::Relaxed);
 }
 
 /// Duplicate mono on all output channels; an empty ring produces silence.

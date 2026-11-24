@@ -166,7 +166,14 @@ fn metronome_is_local_and_mute_gain_are_smooth_and_do_not_stop_phase() {
     let stats = Stats::default();
     rx.sync_metronome(click_config(300, 3), 0);
     let mut output = [0.0_f32; 128];
-    crate::audio::capture(&[0.0; 128], 1, &mut mic, Some(&mut monitor), &stats);
+    crate::audio::capture(
+        &[0.0; 128],
+        1,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        Some(&mut monitor),
+        &stats,
+    );
     mixer.playback(&mut output, 1, &stats);
     assert!(output.iter().any(|&s| s != 0.0));
     assert!((0..128).all(|_| net.pop() == Ok(0.0)));
@@ -197,7 +204,14 @@ fn remote_audio_and_local_monitor_fill_every_output_channel() {
             let mut monitor = mixer.enable_local_monitor();
             let stats = Stats::default();
             let (mut mic, _net) = RingBuffer::new(1);
-            crate::audio::capture(&[local], 1, &mut mic, Some(&mut monitor), &stats);
+            crate::audio::capture(
+                &[local],
+                1,
+                crate::audio::InputRouting::default(),
+                &mut mic,
+                Some(&mut monitor),
+                &stats,
+            );
             rx.push(1, &[remote; RX_TARGET_SAMPLES + 1]);
             let mut out = vec![0.0_f32; output_channels];
             mixer.playback(&mut out, output_channels, &stats);
@@ -205,6 +219,98 @@ fn remote_audio_and_local_monitor_fill_every_output_channel() {
             assert!(!stats.has_errors());
         }
     }
+}
+
+#[test]
+fn dual_local_controls_solos_and_tx_mute_are_independent() {
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
+    let mut monitor = mixer.enable_local_sources(true);
+    let routing = crate::audio::InputRouting::new(1, Some(2)).unwrap();
+    let stats = Stats::default();
+    let (mut tx, mut net) = RingBuffer::new(4);
+    let mut out = [0.0_f32; 2];
+    for (gain, inst_mute, mic_mute, inst_solo, mic_solo, remote_solo, expected) in [
+        (1.0_f32, false, false, false, false, false, 0.875_f32),
+        (0.5, false, false, false, false, false, 0.625),
+        (1.0, true, false, false, false, false, 0.375),
+        (1.0, false, true, false, false, false, 0.625),
+        (1.0, false, false, true, false, false, 0.5),
+        (1.0, false, false, false, true, false, 0.25),
+        (1.0, false, false, true, true, false, 0.75),
+        (1.0, false, false, false, false, true, 0.125),
+        (1.0, false, false, false, true, true, 0.375),
+        (1.0, false, true, false, true, false, 0.0),
+    ] {
+        rx.local_control
+            .gain
+            .store(gain.to_bits(), Ordering::Relaxed);
+        rx.local_control.mute.store(inst_mute, Ordering::Relaxed);
+        rx.local_control.solo.store(inst_solo, Ordering::Relaxed);
+        rx.local_mic_control.mute.store(mic_mute, Ordering::Relaxed);
+        rx.local_mic_control.solo.store(mic_solo, Ordering::Relaxed);
+        rx.controls[0].solo.store(remote_solo, Ordering::Relaxed);
+        for tx_muted in [false, true] {
+            stats.mic_tx_mute.store(tx_muted, Ordering::Relaxed);
+            crate::audio::capture(
+                &[0.5, 0.25],
+                2,
+                routing,
+                &mut tx,
+                Some(&mut monitor),
+                &stats,
+            );
+            assert!(rx.push(1, &[0.125; RX_TARGET_SAMPLES + 1]));
+            mixer.playback(&mut out, 2, &stats);
+            // tanh can differ in its last bit between platform math implementations.
+            assert!(
+                out.iter()
+                    .all(|sample| (*sample - expected.tanh()).abs() <= f32::EPSILON)
+            );
+            assert_eq!(out[0], out[1]);
+            assert_eq!(net.pop(), Ok(if tx_muted { 0.5 } else { 0.75 }));
+        }
+    }
+    rx.local_control.mute.store(true, Ordering::Relaxed);
+    rx.local_mic_control.mute.store(false, Ordering::Relaxed);
+    rx.local_mic_control
+        .gain
+        .store(2.0_f32.to_bits(), Ordering::Relaxed);
+    rx.local_mic_control.solo.store(true, Ordering::Relaxed);
+    rx.controls[0].solo.store(false, Ordering::Relaxed);
+    crate::audio::capture(
+        &[0.5, 0.25],
+        2,
+        routing,
+        &mut tx,
+        Some(&mut monitor),
+        &stats,
+    );
+    mixer.playback(&mut out, 2, &stats);
+    assert_eq!(out, [0.5_f32.tanh(); 2]);
+    // All local samples were consumed even while excluded or muted.
+    mixer.playback(&mut out, 2, &stats);
+    assert_eq!(out, [0.0; 2]);
+}
+
+#[test]
+fn disabled_microphone_solo_cannot_silence_instrument_or_remote_peers() {
+    let (mut rx, mut mixer) = channels(crate::audio::BUFFER_FRAMES);
+    let mut monitor = mixer.enable_local_monitor();
+    rx.local_mic_control.solo.store(true, Ordering::Relaxed);
+    monitor.push_sources(0.5, 0.75);
+    monitor.publish();
+    assert!(rx.push(1, &[0.25; RX_TARGET_SAMPLES + 1]));
+    let mut out = [0.0_f32; 2];
+    mixer.playback(&mut out, 2, &Stats::default());
+    assert_eq!(out, [0.75_f32.tanh(); 2]);
+    let (new_rx, _) = channels(crate::audio::BUFFER_FRAMES);
+    assert!(!new_rx.local_mic_control.solo.load(Ordering::Relaxed));
+    assert!(!new_rx.local_mic_control.mute.load(Ordering::Relaxed));
+    assert_eq!(
+        f32::from_bits(new_rx.local_mic_control.gain.load(Ordering::Relaxed)),
+        1.0
+    );
+    assert!(!Stats::default().mic_tx_mute.load(Ordering::Relaxed));
 }
 
 #[test]
@@ -233,7 +339,14 @@ fn local_monitor_controls_and_solos_never_change_transmitted_samples() {
         rx.local_control.solo.store(local_solo, Ordering::Relaxed);
         rx.controls[0].solo.store(remote_solo, Ordering::Relaxed);
         // Capture uses channel 1; channel 2 must never leak into monitoring or UDP.
-        crate::audio::capture(&[0.5, -0.9], 2, &mut mic, Some(&mut monitor), &stats);
+        crate::audio::capture(
+            &[0.5, -0.9],
+            2,
+            crate::audio::InputRouting::default(),
+            &mut mic,
+            Some(&mut monitor),
+            &stats,
+        );
         rx.push(1, &[0.25; RX_TARGET_SAMPLES + 1]);
         mixer.playback(&mut out, 2, &stats);
         assert_eq!(out, [expected.tanh(); 2]);
@@ -252,7 +365,14 @@ fn local_monitor_starts_without_peers_or_prefill_and_silences_underflow() {
     let mut monitor = mixer.enable_local_monitor();
     let (mut mic, _net) = RingBuffer::new(1);
     let stats = Stats::default();
-    crate::audio::capture(&[0.25, -0.5], 1, &mut mic, Some(&mut monitor), &stats);
+    crate::audio::capture(
+        &[0.25, -0.5],
+        1,
+        crate::audio::InputRouting::default(),
+        &mut mic,
+        Some(&mut monitor),
+        &stats,
+    );
     let mut out = [1.0; 6];
     mixer.playback(&mut out, 2, &stats);
     assert_eq!(
@@ -271,6 +391,7 @@ fn local_monitor_starts_without_peers_or_prefill_and_silences_underflow() {
     crate::audio::capture(
         &[f32::NAN, f32::INFINITY],
         1,
+        crate::audio::InputRouting::default(),
         &mut mic,
         Some(&mut monitor),
         &stats,
@@ -289,6 +410,7 @@ fn delayed_local_output_keeps_only_one_callback_and_rejects_overflowed_old_audio
         crate::audio::capture(
             &vec![0.8; frames * 4],
             1,
+            crate::audio::InputRouting::default(),
             &mut mic,
             Some(&mut monitor),
             &stats,
@@ -296,6 +418,7 @@ fn delayed_local_output_keeps_only_one_callback_and_rejects_overflowed_old_audio
         crate::audio::capture(
             &vec![-0.25; frames],
             1,
+            crate::audio::InputRouting::default(),
             &mut mic,
             Some(&mut monitor),
             &stats,
@@ -309,6 +432,7 @@ fn delayed_local_output_keeps_only_one_callback_and_rejects_overflowed_old_audio
         crate::audio::capture(
             &vec![0.8; crate::audio::RING_CAPACITY],
             1,
+            crate::audio::InputRouting::default(),
             &mut mic,
             Some(&mut monitor),
             &stats,
@@ -316,6 +440,7 @@ fn delayed_local_output_keeps_only_one_callback_and_rejects_overflowed_old_audio
         crate::audio::capture(
             &vec![-0.25; frames],
             1,
+            crate::audio::InputRouting::default(),
             &mut mic,
             Some(&mut monitor),
             &stats,
@@ -326,6 +451,7 @@ fn delayed_local_output_keeps_only_one_callback_and_rejects_overflowed_old_audio
         crate::audio::capture(
             &vec![-0.25; frames],
             1,
+            crate::audio::InputRouting::default(),
             &mut mic,
             Some(&mut monitor),
             &stats,

@@ -1,63 +1,77 @@
-Pre-release del client Virtual Jam `1.0.5-beta`, preparata da `develop`.
+Pre-release of Virtual Jam `1.0.6-beta`.
 
-## Download e installazione
+## Download and Installation
 
-| Sistema | Installer | Requisiti |
+| System | Installer | Requirements |
 | --- | --- | --- |
-| Windows | `Virtual-Jam-1.0.5-beta-windows-x64-setup.exe` | Windows 10/11 x64; installazione per utente, senza amministratore |
-| macOS Apple Silicon | `Virtual-Jam-1.0.5-beta-macos-arm64.pkg` | macOS 11 o successivo |
+| Windows x64 | `Virtual-Jam-1.0.6-beta-windows-x64-setup.exe` | Windows 10/11 x64; per-user install, no administrator privileges required |
+| macOS Apple Silicon | `Virtual-Jam-1.0.6-beta-macos-arm64.pkg` | macOS 11 or later on ARM64 |
+| Linux x64 client | `Virtual-Jam-1.0.6-beta-linux-amd64.deb` | Ubuntu 22.04+ / compatible Debian-based x86_64 system with glibc 2.35+ |
+| Linux x64 standalone server | `Virtual-Jam-Server-1.0.6-beta-linux-amd64.tar.gz` | Linux x86_64 with glibc 2.35+; no audio hardware or Rust toolchain required |
 
-macOS: aprire il pacchetto e avviare **Virtual Jam** da Applicazioni; consentire l'accesso al microfono.
-Windows: eseguire il setup e avviare **Virtual Jam** dal menu Start.
-`SHA256SUMS.txt` contiene gli hash degli installer.
+macOS: open the package and launch **Virtual Jam** from Applications; grant microphone access.
+Windows: run the installer and launch **Virtual Jam** from the Start menu.
+Linux client: run `sudo apt install ./Virtual-Jam-1.0.6-beta-linux-amd64.deb`, then launch **Virtual Jam** or `virtual-jam`.
+Linux server: extract the archive and run `./jam-server`; see the included `deploy/README.md` for systemd installation.
+`SHA256SUMS.txt` contains hashes for all four downloadable assets.
 
-Gli installer di questa beta non hanno una firma commerciale Windows/Apple né notarizzazione Apple. SmartScreen o Gatekeeper possono richiedere un'autorizzazione esplicita nelle impostazioni di sicurezza. La firma ad hoc del bundle macOS non certifica l'identità dell'autore.
+The installers in this beta do not carry commercial Windows/Apple code signing or Apple notarization. SmartScreen or Gatekeeper may require explicit approval in system security settings. The ad-hoc signature on the macOS bundle does not certify the author's identity.
 
-## Novità rispetto a 1.0.4-beta
+## What's New Since 1.0.5-beta
 
-- Migliorata la continuità audio durante le raffiche UDP e ridotta la starvation del mixer (JAM-35).
-- Ridotti i buffer locali di ricezione e stabilizzata la sincronizzazione del Tempo Leader (JAM-36).
-- Aggiunti signaling P2P ibrido e inoltro selettivo del server SFU (JAM-37).
-- Aggiunte rotte audio UDP dirette tra peer, con fallback automatico sul server SFU e indicazione della rotta nella GUI (JAM-38).
+- Independent instrument and optional microphone channel selection on multi-channel interfaces, with separate local headphone-monitoring strips and a **Mute Mic (Net)** toggle (JAM-42).
+- Desktop interface, tooltips, and user-facing validation and diagnostic messages in English (JAM-45).
+- Linux x64 `.deb` client and precompiled standalone `jam-server` archive, built and published automatically alongside Windows and macOS installers (JAM-46).
+- Optional sharing of an anonymous end-of-session technical report, disabled by default, plus an optional collector for client reports and server logs. Reports contain no audio or nicknames; the receiving service observes the source IP. See the README privacy notice (JAM-39).
+- GPL-3.0-or-later licensing with an additional permission for linking the Steinberg ASIO SDK, third-party license checks, repository hardening, and English documentation (JAM-40, JAM-41).
+- Quick Start for beta testers, interface preview, and a structured GitHub feedback template (JAM-47).
 
-Client e server devono essere aggiornati insieme alla `1.0.5-beta`: il signaling introduce nuovi messaggi binari e richiede un server compatibile.
+Update the whole room to `1.0.6-beta`, including the server. See the README's **Quick Start for Beta Testers** for hardware setup, connection instructions, and optional feedback.
 
-## Novità della 1.0.4-beta
+## What's New in 1.0.5-beta
 
-- Migliorata la continuità della riproduzione durante lo smaltimento degli arretrati e il recupero da micro-interruzioni (JAM-28, JAM-30).
-- Isolato l'I/O della telemetria e migliorata la priorità del controller audio (JAM-29).
-- Aggiunta una stima della latenza end-to-end (JAM-31).
-- Aggiunti clock di stanza e metronomo condiviso, con sintesi locale e controlli nella GUI (JAM-32, JAM-33, JAM-34).
+- Improved audio continuity during UDP bursts and reduced mixer starvation (JAM-35).
+- Reduced local receive buffers and stabilized Tempo Leader synchronization (JAM-36).
+- Added hybrid P2P signaling and selective SFU server forwarding (JAM-37).
+- Added direct UDP audio routes between peers, with automatic fallback to the SFU server and route indicators in the GUI (JAM-38).
 
-## Novità della 1.0.3-beta
+The `1.0.5-beta` signaling changes introduce new binary messages and require a compatible server.
 
-- Preservato l'audio in ricezione durante le pause di scheduling del client (JAM-24).
-- Migliorato il recupero dei jitter buffer vuoti dopo picchi di latenza e corretto il timeout di attività dei peer (JAM-25).
-- Estesa la diagnostica audio e dei worker per analizzare le sessioni problematiche (JAM-26).
-- Preferite le configurazioni di uscita stereo nella selezione del dispositivo audio (JAM-27).
-- Installer disponibili per Windows x64 e macOS Apple Silicon ARM64.
+## What's New in 1.0.4-beta
 
-## Funzionalità introdotte nelle beta precedenti
+- Improved playback continuity while draining backlogs and recovering from micro-dropouts (JAM-28, JAM-30).
+- Isolated telemetry I/O and improved audio controller thread priority (JAM-29).
+- Added an end-to-end latency budget estimate (JAM-31).
+- Added room clock and shared metronome, with local synthesis and GUI controls (JAM-32, JAM-33, JAM-34).
 
-- Ridotti gli underflow periodici del mixer in ricezione: le code dei peer vengono precaricate e mantengono una riserva di riproduzione (JAM-21).
-- Preservata la continuità del decoder Opus durante l'adattamento del jitter buffer, evitando salti nella cronologia del codec (JAM-22).
-- Corretta la crescita della latenza del jitter buffer causata dai ritardi di scheduling del client, con gestione dei pacchetti in raffica e dei salti del clock di riproduzione (JAM-23).
+## What's New in 1.0.3-beta
 
-- Latenza di ricezione limitata e recupero del clock di riproduzione per evitare accumuli di ritardo nelle sessioni (JAM-17).
-- Monitoraggio diretto dell'ingresso locale in cuffia, con gain e mute dedicati senza modificare il segnale inviato ai peer (JAM-18).
-- Log di telemetria delle sessioni GUI, abilitati negli installer di pre-release: file `telemetry-*.txt` accanto a `client.toml`, utili per segnalare problemi di audio e rete (JAM-20).
-- Benchmark di rete headless multi-peer disponibile nei sorgenti come esempio `net_bench` per verificare il comportamento sotto carico (JAM-19).
+- Preserved incoming audio during client scheduling pauses (JAM-24).
+- Improved recovery of empty jitter buffers after latency spikes and fixed peer activity timeout (JAM-25).
+- Extended audio and worker diagnostics to analyze problematic sessions (JAM-26).
+- Preferred stereo output configurations during audio device selection (JAM-27).
+- Installers available for Windows x64 and macOS Apple Silicon ARM64.
 
-## Funzionalità
+## Features Introduced in Earlier Betas
 
-- Client desktop con selezione backend e dispositivi audio, buffer e preferenze persistenti.
-- Sessioni audio UDP tramite server SFU, codec Opus e jitter buffer indipendenti.
-- Mixer per partecipante con gain, mute e solo; VU meter e telemetria di rete.
-- Backend ALSA su Linux, WASAPI/ASIO su Windows e CoreAudio su macOS.
+- Reduced periodic receive mixer underflows: peer queues are prefilled and maintain a playback reserve (JAM-21).
+- Preserved Opus decoder continuity during jitter buffer adaptation, avoiding jumps in codec history (JAM-22).
+- Fixed jitter buffer latency growth caused by client scheduling delays, with burst packet handling and playback clock jumps (JAM-23).
+- Bounded receive latency and playback clock recovery to prevent delay accumulation across sessions (JAM-17).
+- Direct local input headphone monitoring, with dedicated gain and mute without altering the signal sent to peers (JAM-18).
+- GUI session telemetry logs, enabled in pre-release installers: `telemetry-*.txt` files next to `client.toml`, useful for reporting audio and network issues (JAM-20).
+- Multi-peer headless network benchmark available in source as the `net_bench` example to verify behavior under load (JAM-19).
 
-## Limiti della beta
+## Features
 
-Serve un server Virtual Jam compatibile, raggiungibile via UDP (porta predefinita 7777): inserire il suo indirizzo nella GUI. Il server non viene installato dai pacchetti desktop; le istruzioni per compilarlo e installarlo sono in `deploy/README.md` nei sorgenti allegati.
-Usare cuffie e dispositivi che supportano 48 kHz. ASIO richiede il driver del produttore.
-Il protocollo attuale non offre autenticazione o cifratura: utilizzare sessioni su reti fidate/VPN.
-Le verifiche automatiche non sostituiscono le prove audio reali: compatibilità delle schede, latenza e ascolto multipiattaforma restano da validare dai beta tester.
+- Desktop client with audio backend/device selection, buffer size selection, and persistent preferences.
+- UDP audio sessions via SFU server, Opus codec, and independent per-peer jitter buffers.
+- Per-participant mixer with gain, mute, and solo; VU meters and network telemetry.
+- ALSA backend on Linux, WASAPI/ASIO on Windows, and CoreAudio on macOS.
+
+## Beta Limitations
+
+A compatible Virtual Jam server reachable over UDP (default port 7777) is required: enter its address in the GUI. The server is distributed separately from the desktop packages in the Linux standalone archive, which includes `deploy/README.md` installation instructions.
+Use headphones and devices that support 48 kHz. ASIO requires the manufacturer's driver.
+The current protocol does not provide authentication or encryption: use sessions on trusted networks or VPNs.
+Automated checks do not replace real audio testing: interface compatibility, latency, and cross-platform listening remain to be validated by beta testers.

@@ -16,6 +16,7 @@ use crate::{
     audio::{self, Stats},
     cli, mixer,
     network::Network,
+    session_report::{ReportTarget, SessionMetadata, SessionReportAccumulator},
     setup::{Catalog, Preferences},
     streams,
 };
@@ -42,6 +43,8 @@ pub struct MixerView {
     pub metronome: Arc<mixer::MetronomeControls>,
     pub stats: Arc<Stats>,
     pub local_control: Arc<mixer::Controls>,
+    pub local_mic_control: Arc<mixer::Controls>,
+    pub mic_enabled: bool,
     pub peers: Vec<jam_protocol::PeerInfo>,
     pub controls: Arc<[mixer::Controls; jam_protocol::MAX_PEERS]>,
 }
@@ -103,8 +106,11 @@ impl Controller {
 
 // A session is created and destroyed on its owning thread (CPAL streams can be !Send).
 struct Session {
+    mic_enabled: bool,
     published_metronome: Option<jam_protocol::MetronomeState>,
     buffer_frames: u32,
+    audio_backend: String,
+    sample_rate_hz: u32,
     #[cfg(feature = "telemetry-log")]
     log_preferences: Preferences,
     #[cfg(feature = "telemetry-log")]
@@ -120,8 +126,10 @@ struct Session {
 impl Session {
     fn start(preferences: &Preferences) -> io::Result<Self> {
         let endpoint = preferences.endpoint()?;
+        let routing = preferences.input_routing()?;
         let build = || -> Result<Self, Box<dyn std::error::Error>> {
             let host = cli::host(preferences.host.as_deref())?;
+            let audio_backend = host.id().name().to_owned();
             let (input, output) = cli::devices(
                 &host,
                 preferences.input.as_deref(),
@@ -130,28 +138,35 @@ impl Session {
             let frames = preferences.buffer_frames;
             #[cfg(feature = "telemetry-log")]
             let log_preferences = Preferences {
-                host: Some(host.id().name().into()),
+                host: Some(audio_backend.clone()),
                 input: Some(input.name()?),
                 output: Some(output.name()?),
                 ..preferences.clone()
             };
-            let input_config =
-                audio::select_input_config_for_buffer(input.supported_input_configs()?, frames)
-                    .ok_or_else(|| {
-                        io::Error::other("Input incompatibile con 48 kHz e il buffer scelto.")
-                    })?;
+            let input_config = audio::select_input_config_for_channels(
+                input.supported_input_configs()?,
+                frames,
+                routing.required_channels(),
+            )
+            .ok_or_else(|| {
+                io::Error::other(
+                    "Input incompatible with the selected channels, 48 kHz and the selected buffer.",
+                )
+            })?;
             let output_config =
                 audio::select_output_config_for_buffer(output.supported_output_configs()?, frames)
                     .ok_or_else(|| {
-                        io::Error::other("Output incompatibile con 48 kHz e il buffer scelto.")
+                        io::Error::other("Output incompatible with 48 kHz and the selected buffer.")
                     })?;
+            let sample_rate_hz = output_config.stream.sample_rate.0;
             let stats = Arc::new(Stats::default());
             let (producer, mic) = RingBuffer::new(audio::RING_CAPACITY);
             let (rx, mut mixer) = mixer::channels(frames as usize);
-            let monitor = mixer.enable_local_monitor();
+            let monitor = mixer.enable_local_sources(routing.mic_enabled());
             let input = streams::input(
                 &input,
                 &input_config,
+                routing,
                 producer,
                 Some(monitor),
                 Arc::clone(&stats),
@@ -163,8 +178,11 @@ impl Session {
                 Arc::clone(&stats),
             )?;
             let session = Self {
+                mic_enabled: routing.mic_enabled(),
                 published_metronome: None,
                 buffer_frames: frames,
+                audio_backend,
+                sample_rate_hz,
                 #[cfg(feature = "telemetry-log")]
                 log_preferences,
                 #[cfg(feature = "telemetry-log")]
@@ -213,7 +231,17 @@ trait ActiveSession {
     fn log_preferences(&self, requested: &Preferences) -> Preferences {
         requested.clone()
     }
-    #[cfg(feature = "telemetry-log")]
+    fn report_metadata(&self, requested: &Preferences) -> SessionMetadata {
+        SessionMetadata {
+            audio_backend: requested
+                .host
+                .clone()
+                .unwrap_or_else(|| "default".to_owned()),
+            sample_rate_hz: jam_protocol::SAMPLE_RATE,
+            buffer_frames: requested.buffer_frames,
+            peer_id: None,
+        }
+    }
     fn xruns(&self) -> [u32; 2] {
         [0; 2]
     }
@@ -250,7 +278,14 @@ impl ActiveSession for Session {
     fn log_preferences(&self, _: &Preferences) -> Preferences {
         self.log_preferences.clone()
     }
-    #[cfg(feature = "telemetry-log")]
+    fn report_metadata(&self, _: &Preferences) -> SessionMetadata {
+        SessionMetadata {
+            audio_backend: self.audio_backend.clone(),
+            sample_rate_hz: self.sample_rate_hz,
+            buffer_frames: self.buffer_frames,
+            peer_id: self.network.local_peer_id(),
+        }
+    }
     fn xruns(&self) -> [u32; 2] {
         use std::sync::atomic::Ordering;
         [
@@ -279,13 +314,15 @@ impl ActiveSession for Session {
             stats: Arc::clone(&self.stats),
             controls: Arc::clone(&self.rx.controls),
             local_control: Arc::clone(&self.rx.local_control),
+            local_mic_control: Arc::clone(&self.rx.local_mic_control),
+            mic_enabled: self.mic_enabled,
         })
     }
 
     fn poll(&mut self) -> io::Result<bool> {
         if self.stats.has_hardware_errors() {
             return Err(io::Error::other(
-                "Errore audio: verifica scheda, driver e buffer.",
+                "Audio error: check the audio interface, driver and buffer.",
             ));
         }
         self.network
@@ -327,10 +364,11 @@ fn control_loop<S: ActiveSession>(
     // Declaration order also stops streams before joining the logger during unwinding.
     #[cfg(feature = "telemetry-log")]
     let mut log: Option<crate::telemetry_log::AsyncSessionLog> = None;
+    let mut session_report: Option<(SessionReportAccumulator, ReportTarget)> = None;
+    let mut pending_upload: Option<JoinHandle<Result<(), String>>> = None;
     let mut session: Option<S> = None;
     let mut phase = Phase::Disconnected;
-    #[cfg(feature = "telemetry-log")]
-    let mut remote_peers = 0;
+    let mut remote_peers = 0_u32;
     loop {
         let wait = if session.is_some() {
             Duration::from_micros(250)
@@ -342,7 +380,7 @@ fn control_loop<S: ActiveSession>(
                 Command::Metronome(config) => {
                     if let Some(active) = &mut session {
                         if let Err(error) = active.update_metronome(config) {
-                            send(Event::Error(format!("Metronomo: {error}")));
+                            send(Event::Error(format!("Metronome: {error}")));
                         }
                     }
                 }
@@ -367,6 +405,7 @@ fn control_loop<S: ActiveSession>(
                     drop(session.take());
                     #[cfg(feature = "telemetry-log")]
                     drop(log.take());
+                    finish_report(&mut session_report, &mut pending_upload);
                     phase = Phase::Disconnected;
                     send(Event::Phase(phase));
                 }
@@ -386,6 +425,7 @@ fn control_loop<S: ActiveSession>(
                     drop(session.take());
                     #[cfg(feature = "telemetry-log")]
                     drop(log.take());
+                    finish_report(&mut session_report, &mut pending_upload);
                     if let Some(selected) = selected {
                         save(&selected);
                     }
@@ -399,9 +439,15 @@ fn control_loop<S: ActiveSession>(
             match active.poll() {
                 Ok(true) if phase != Phase::Connected => {
                     phase = Phase::Connected;
+                    remote_peers = 0;
+                    if let Some(target) = preferences.report_target() {
+                        session_report = Some((
+                            SessionReportAccumulator::start(active.report_metadata(&preferences)),
+                            target,
+                        ));
+                    }
                     #[cfg(feature = "telemetry-log")]
                     {
-                        remote_peers = 0;
                         match crate::telemetry_log::AsyncSessionLog::start(
                             path,
                             &active.log_preferences(&preferences),
@@ -418,6 +464,7 @@ fn control_loop<S: ActiveSession>(
                     drop(session.take());
                     #[cfg(feature = "telemetry-log")]
                     drop(log.take());
+                    finish_report(&mut session_report, &mut pending_upload);
                     phase = Phase::Disconnected;
                     send(Event::Error(error.to_string()));
                     send(Event::Phase(phase));
@@ -430,7 +477,7 @@ fn control_loop<S: ActiveSession>(
                     events,
                     #[cfg(feature = "telemetry-log")]
                     &mut log,
-                    #[cfg(feature = "telemetry-log")]
+                    &mut session_report,
                     &mut remote_peers,
                 );
             }
@@ -439,28 +486,52 @@ fn control_loop<S: ActiveSession>(
     drop(session.take());
     #[cfg(feature = "telemetry-log")]
     drop(log.take());
+    finish_report(&mut session_report, &mut pending_upload);
+    if let Some(handle) = pending_upload.take() {
+        let _ = handle.join();
+    }
+}
+
+fn finish_report(
+    session_report: &mut Option<(SessionReportAccumulator, ReportTarget)>,
+    pending_upload: &mut Option<JoinHandle<Result<(), String>>>,
+) {
+    if let Some((accumulator, target)) = session_report.take() {
+        let report = accumulator.finalize();
+        if let Some(previous) = pending_upload.take() {
+            let _ = previous.join();
+        }
+        *pending_upload = crate::session_report::upload_async(report, target);
+    }
 }
 
 fn publish_updates<S: ActiveSession>(
     active: &mut S,
     events: &Sender<Event>,
     #[cfg(feature = "telemetry-log")] log: &mut Option<crate::telemetry_log::AsyncSessionLog>,
-    #[cfg(feature = "telemetry-log")] remote_peers: &mut u32,
+    session_report: &mut Option<(SessionReportAccumulator, ReportTarget)>,
+    remote_peers: &mut u32,
 ) {
     if let Some(state) = active.metronome_update() {
         let _ = events.send(Event::Metronome(state));
     }
     if let Some(view) = active.mixer_update() {
-        #[cfg(feature = "telemetry-log")]
-        {
-            *remote_peers = u32::try_from(view.peers.len()).unwrap_or(u32::MAX);
+        *remote_peers = u32::try_from(view.peers.len()).unwrap_or(u32::MAX);
+        if let Some((accumulator, _)) = session_report.as_mut() {
+            if view.local_peer_id != 0 {
+                accumulator.set_peer_id(Some(view.local_peer_id));
+            }
         }
         let _ = events.send(Event::Mixer(view));
     }
     if let Some(metrics) = active.telemetry_update() {
+        let xruns = active.xruns();
         #[cfg(feature = "telemetry-log")]
         if let Some(writer) = log.as_mut() {
-            writer.record(*remote_peers, metrics, active.xruns());
+            writer.record(*remote_peers, metrics, xruns);
+        }
+        if let Some((accumulator, _)) = session_report.as_mut() {
+            accumulator.record(*remote_peers, metrics, xruns);
         }
         let _ = events.send(Event::Telemetry(metrics));
     }

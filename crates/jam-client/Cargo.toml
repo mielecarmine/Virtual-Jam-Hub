@@ -3,6 +3,10 @@ name = "jam-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Low-latency real-time audio client, jitter buffer, Opus codec, mixer, and desktop GUI for Virtual Jam"
 
 [features]
 default = []
@@ -17,8 +21,10 @@ opus = "0.4"
 eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 crossbeam-channel = "0.5"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 directories = "6"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 cpal = { version = "0.15.3", features = ["asio"] }
@@ -28,6 +34,7 @@ workspace = true
 
 [dev-dependencies]
 jam-server = { path = "../jam-server" }
+jam-collector = { path = "../jam-collector" }
 
 [[example]]
 name = "net_bench"
