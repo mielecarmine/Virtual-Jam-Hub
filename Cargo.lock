@@ -1304,7 +1304,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jam-client"
-version = "1.0.5-beta"
+version = "1.0.6-beta"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -1324,15 +1324,15 @@ dependencies = [
 
 [[package]]
 name = "jam-collector"
-version = "1.0.5-beta"
+version = "1.0.6-beta"
 
 [[package]]
 name = "jam-protocol"
-version = "1.0.5-beta"
+version = "1.0.6-beta"
 
 [[package]]
 name = "jam-server"
-version = "1.0.5-beta"
+version = "1.0.6-beta"
 dependencies = [
  "ctrlc",
  "jam-collector",

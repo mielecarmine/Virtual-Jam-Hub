@@ -14,19 +14,18 @@ the engineering target is below 20–25 ms, not a guaranteed result.
 ### 1. Download and install
 
 Use **GitHub Releases**, including pre-releases (the `/releases/latest` shortcut can
-skip betas). The currently published beta is **1.0.5-beta**:
+skip betas). The **1.0.6-beta** release provides these downloads once published:
 
 | System | Download / availability | Installation and requirements |
 | --- | --- | --- |
-| Windows x64 | [Download `.exe` (1.0.5-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.5-beta/Virtual-Jam-1.0.5-beta-windows-x64-setup.exe) | Windows 10/11; run the installer, then open **Virtual Jam** from Start. Per-user installation. |
-| macOS Apple Silicon | [Download `.pkg` (1.0.5-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.5-beta/Virtual-Jam-1.0.5-beta-macos-arm64.pkg) | macOS 11+ on ARM64; open the package, launch **Virtual Jam** from Applications, and allow microphone access. |
-| Linux x64 client | `.deb` prepared for the next beta; not yet published in [Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases) | Ubuntu 22.04+ / compatible Debian-based x86_64 system (glibc 2.35+). Install with `sudo apt install ./Virtual-Jam-VERSION-linux-amd64.deb`; launch **Virtual Jam** or `virtual-jam`. |
-| Linux x64 standalone server | `.tar.gz` prepared for the next beta; not yet published in [Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases) | Linux x86_64, glibc 2.35+; no audio hardware required. See [server setup](deploy/README.md). |
+| Windows x64 | [Download `.exe` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-1.0.6-beta-windows-x64-setup.exe) | Windows 10/11; run the installer, then open **Virtual Jam** from Start. Per-user installation. |
+| macOS Apple Silicon | [Download `.pkg` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-1.0.6-beta-macos-arm64.pkg) | macOS 11+ on ARM64; open the package, launch **Virtual Jam** from Applications, and allow microphone access. |
+| Linux x64 client | [Download `.deb` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-1.0.6-beta-linux-amd64.deb) | Ubuntu 22.04+ / compatible Debian-based x86_64 system (glibc 2.35+). Install with `sudo apt install ./Virtual-Jam-1.0.6-beta-linux-amd64.deb`; launch **Virtual Jam** or `virtual-jam`. |
+| Linux x64 standalone server | [Download `.tar.gz` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-Server-1.0.6-beta-linux-amd64.tar.gz) | Linux x86_64, glibc 2.35+; no audio hardware required. See [server setup](deploy/README.md). |
 
-The active **1.0.6-beta** development branch includes the English interface (JAM-45)
-and Linux packaging (JAM-46). The published 1.0.5-beta installers predate those changes;
-their labels may differ from the preview below. Until the next release is published,
-Linux users can [build from source](CONTRIBUTING.md#3-build-prerequisites).
+**1.0.6-beta** includes the English interface (JAM-45) and Linux packaging (JAM-46).
+If its downloads are not available yet, check [Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases)
+for the published betas or [build from source](CONTRIBUTING.md#3-build-prerequisites).
 Client and server must use compatible builds; update the whole room together.
 
 **Unsigned beta:** these installers have no commercial Windows/Apple code signing or
@@ -58,8 +57,8 @@ a LAN, or `[IPv6]:7777`), choose **Backend**, **Input**, **Output** and **Buffer
 click **Connect**. Ask another musician to join the same server: you hear remote peers
 and your locally monitored input. One server hosts one room of at most **8 musicians**.
 
-**LAN / self-hosted server:** on a Linux host, extract the standalone archive when
-available and run `./jam-server`. Alternatively, from a source checkout with
+**LAN / self-hosted server:** on a Linux host, extract the standalone archive and
+run `./jam-server`. Alternatively, from a source checkout with
 [build prerequisites](CONTRIBUTING.md#3-build-prerequisites):
 
 ```sh
