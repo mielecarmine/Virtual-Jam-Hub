@@ -1,26 +1,41 @@
-Pre-release of the Virtual Jam client `1.0.5-beta`, prepared from `develop`.
+Pre-release of Virtual Jam `1.0.6-beta`.
 
 ## Download and Installation
 
 | System | Installer | Requirements |
 | --- | --- | --- |
-| Windows | `Virtual-Jam-1.0.5-beta-windows-x64-setup.exe` | Windows 10/11 x64; per-user install, no administrator privileges required |
-| macOS Apple Silicon | `Virtual-Jam-1.0.5-beta-macos-arm64.pkg` | macOS 11 or later |
+| Windows x64 | `Virtual-Jam-1.0.6-beta-windows-x64-setup.exe` | Windows 10/11 x64; per-user install, no administrator privileges required |
+| macOS Apple Silicon | `Virtual-Jam-1.0.6-beta-macos-arm64.pkg` | macOS 11 or later on ARM64 |
+| Linux x64 client | `Virtual-Jam-1.0.6-beta-linux-amd64.deb` | Ubuntu 22.04+ / compatible Debian-based x86_64 system with glibc 2.35+ |
+| Linux x64 standalone server | `Virtual-Jam-Server-1.0.6-beta-linux-amd64.tar.gz` | Linux x86_64 with glibc 2.35+; no audio hardware or Rust toolchain required |
 
 macOS: open the package and launch **Virtual Jam** from Applications; grant microphone access.
 Windows: run the installer and launch **Virtual Jam** from the Start menu.
-`SHA256SUMS.txt` contains the installer hashes.
+Linux client: run `sudo apt install ./Virtual-Jam-1.0.6-beta-linux-amd64.deb`, then launch **Virtual Jam** or `virtual-jam`.
+Linux server: extract the archive and run `./jam-server`; see the included `deploy/README.md` for systemd installation.
+`SHA256SUMS.txt` contains hashes for all four downloadable assets.
 
 The installers in this beta do not carry commercial Windows/Apple code signing or Apple notarization. SmartScreen or Gatekeeper may require explicit approval in system security settings. The ad-hoc signature on the macOS bundle does not certify the author's identity.
 
-## What's New Since 1.0.4-beta
+## What's New Since 1.0.5-beta
+
+- Independent instrument and optional microphone channel selection on multi-channel interfaces, with separate local headphone-monitoring strips and a **Mute Mic (Net)** toggle (JAM-42).
+- Desktop interface, tooltips, and user-facing validation and diagnostic messages in English (JAM-45).
+- Linux x64 `.deb` client and precompiled standalone `jam-server` archive, built and published automatically alongside Windows and macOS installers (JAM-46).
+- Optional sharing of an anonymous end-of-session technical report, disabled by default, plus an optional collector for client reports and server logs. Reports contain no audio or nicknames; the receiving service observes the source IP. See the README privacy notice (JAM-39).
+- GPL-3.0-or-later licensing with an additional permission for linking the Steinberg ASIO SDK, third-party license checks, repository hardening, and English documentation (JAM-40, JAM-41).
+- Quick Start for beta testers, interface preview, and a structured GitHub feedback template (JAM-47).
+
+Update the whole room to `1.0.6-beta`, including the server. See the README's **Quick Start for Beta Testers** for hardware setup, connection instructions, and optional feedback.
+
+## What's New in 1.0.5-beta
 
 - Improved audio continuity during UDP bursts and reduced mixer starvation (JAM-35).
 - Reduced local receive buffers and stabilized Tempo Leader synchronization (JAM-36).
 - Added hybrid P2P signaling and selective SFU server forwarding (JAM-37).
 - Added direct UDP audio routes between peers, with automatic fallback to the SFU server and route indicators in the GUI (JAM-38).
 
-Client and server must be updated together to `1.0.5-beta`: signaling introduces new binary messages and requires a compatible server.
+The `1.0.5-beta` signaling changes introduce new binary messages and require a compatible server.
 
 ## What's New in 1.0.4-beta
 
@@ -56,7 +71,7 @@ Client and server must be updated together to `1.0.5-beta`: signaling introduces
 
 ## Beta Limitations
 
-A compatible Virtual Jam server reachable over UDP (default port 7777) is required: enter its address in the GUI. The server is not installed by the desktop packages; instructions to build and install it are in `deploy/README.md` in the attached sources.
+A compatible Virtual Jam server reachable over UDP (default port 7777) is required: enter its address in the GUI. The server is distributed separately from the desktop packages in the Linux standalone archive, which includes `deploy/README.md` installation instructions.
 Use headphones and devices that support 48 kHz. ASIO requires the manufacturer's driver.
 The current protocol does not provide authentication or encryption: use sessions on trusted networks or VPNs.
 Automated checks do not replace real audio testing: interface compatibility, latency, and cross-platform listening remain to be validated by beta testers.
