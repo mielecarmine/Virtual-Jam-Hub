@@ -14,25 +14,26 @@ the engineering target is below 20–25 ms, not a guaranteed result.
 ### 1. Download and install
 
 Use **GitHub Releases**, including pre-releases (the `/releases/latest` shortcut can
-skip betas). The **1.0.6-beta** release provides these downloads once published:
+skip betas). Download the current **[1.0.6-beta](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/tag/1.0.6-beta)** pre-release:
 
-| System | Download / availability | Installation and requirements |
+| System | Download | Installation and requirements |
 | --- | --- | --- |
 | Windows x64 | [Download `.exe` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-1.0.6-beta-windows-x64-setup.exe) | Windows 10/11; run the installer, then open **Virtual Jam** from Start. Per-user installation. |
 | macOS Apple Silicon | [Download `.pkg` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-1.0.6-beta-macos-arm64.pkg) | macOS 11+ on ARM64; open the package, launch **Virtual Jam** from Applications, and allow microphone access. |
 | Linux x64 client | [Download `.deb` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-1.0.6-beta-linux-amd64.deb) | Ubuntu 22.04+ / compatible Debian-based x86_64 system (glibc 2.35+). Install with `sudo apt install ./Virtual-Jam-1.0.6-beta-linux-amd64.deb`; launch **Virtual Jam** or `virtual-jam`. |
 | Linux x64 standalone server | [Download `.tar.gz` (1.0.6-beta)](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/Virtual-Jam-Server-1.0.6-beta-linux-amd64.tar.gz) | Linux x86_64, glibc 2.35+; no audio hardware required. See [server setup](deploy/README.md). |
 
-**1.0.6-beta** includes the English interface (JAM-45) and Linux packaging (JAM-46).
-If its downloads are not available yet, check [Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases)
-for the published betas or [build from source](CONTRIBUTING.md#3-build-prerequisites).
+**1.0.6-beta** includes the English interface (JAM-45), Linux client and server packaging (JAM-46),
+and independent instrument/microphone channels (JAM-42). You can also browse all
+[Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases) or
+[build from source](CONTRIBUTING.md#3-build-prerequisites).
 Client and server must use compatible builds; update the whole room together.
 
 **Unsigned beta:** these installers have no commercial Windows/Apple code signing or
 Apple notarization. SmartScreen or Gatekeeper may ask for explicit approval. Only approve
 an installer you trust from this repository's Releases page; do not disable system-wide
 protections. The macOS ad-hoc signature does not certify the author's identity.
-Check downloaded files against the release's `SHA256SUMS.txt`.
+Check downloaded files against the release's [`SHA256SUMS.txt`](https://github.com/mielecarmine/Virtual-Jam-Hub/releases/download/1.0.6-beta/SHA256SUMS.txt).
 
 ### 2. Prepare your audio hardware
 
@@ -117,8 +118,8 @@ Sharing diagnostics is optional:
 
 ![Virtual Jam English setup screen with nickname, server address, audio backend, input and output, instrument and microphone channels, 128-frame buffer, optional report checkbox, and Connect button](docs/images/beta-setup.jpg)
 
-*Actual Windows setup screen from the active pre-release branch. No session is running;
-the mixer and metronome appear after connecting. Older published betas may differ.*
+*Actual Windows setup screen from 1.0.6-beta. No session is running;
+the mixer and metronome appear after connecting.*
 
 | Area in the connected interface | What to look for |
 | --- | --- |
@@ -130,11 +131,8 @@ the mixer and metronome appear after connecting. Older published betas may diffe
 For engineering details, building, and protocol documentation, continue below or read
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-<!-- Release maintenance: when 1.0.6-beta is published, replace the download table with
-direct links to all four assets from that release and its SHA256SUMS.txt. Asset names:
-Virtual-Jam-VERSION-windows-x64-setup.exe, Virtual-Jam-VERSION-macos-arm64.pkg,
-Virtual-Jam-VERSION-linux-amd64.deb, Virtual-Jam-Server-VERSION-linux-amd64.tar.gz.
-Verify against the published release, not just the workflow artifacts. Refresh the setup
+<!-- Release maintenance: when publishing a new beta, update the download table links
+and SHA256SUMS.txt link above to match the published release assets. Refresh the setup
 screenshot when GUI labels change; add a connected-session screenshot showing the mixer,
 route indicators and metronome, using test nicknames and no private endpoints. -->
 
@@ -686,10 +684,11 @@ disconnect.
 
 ### Beta Releases and Installers
 
-Desktop installers are available on [GitHub Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases).
-Beta releases cover Windows x64 (`.exe`) and macOS Apple Silicon (`.pkg`) (and Linux
-`.deb` packaging scripts). Requirements and limitations are described in the
-[beta release notes](packaging/RELEASE-NOTES.md).
+Desktop installers and standalone server archives are available on
+[GitHub Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases).
+Beta releases cover Windows x64 (`.exe`), macOS Apple Silicon (`.pkg`), Linux x64 client
+(`.deb`), and Linux x64 standalone server (`.tar.gz`). Requirements and limitations are
+described in the [beta release notes](packaging/RELEASE-NOTES.md).
 
 The `.github/workflows/release.yml` pipeline runs fmt, clippy, tests, release builds, and
 smoke-test installation on each platform. `codex/release-*` branches produce verification
