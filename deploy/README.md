@@ -5,6 +5,31 @@ room authentication or encryption: the public endpoint is intended for developme
 
 ## Installation
 
+### Precompiled Linux x86_64 archive
+
+Download `Virtual-Jam-Server-VERSION-linux-amd64.tar.gz` and `SHA256SUMS.txt`
+from [GitHub Releases](https://github.com/mielecarmine/Virtual-Jam-Hub/releases).
+Replace `VERSION` with the release version. The archive targets Linux x86_64
+with glibc >= 2.35 (Ubuntu 22.04 or later); no Rust toolchain is required.
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS.txt
+tar -xzf Virtual-Jam-Server-VERSION-linux-amd64.tar.gz
+./jam-server --help
+./jam-server
+```
+
+The last command starts the server in the foreground on UDP port 7777.
+Stop it with Ctrl+C before installing the service below. To install it as a
+systemd service on Ubuntu/Debian with UFW, run from the extracted directory:
+
+```sh
+sudo apt-get install ufw
+sudo sh deploy/install.sh ./jam-server
+```
+
+### Build from source
+
 On Ubuntu/Debian with systemd and UFW, build with Rust >= 1.85 on the target
 machine (or with a toolchain matching the target's architecture and glibc):
 
